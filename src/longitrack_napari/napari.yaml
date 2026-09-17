@@ -1,0 +1,35 @@
+name: longitrack-napari
+display_name: LongiSeg Tracking
+
+contributions:
+  commands:
+    - id: longitrack-napari.get_reader
+      title: Read medical image volumes (SimpleITK)
+      python_name: longitrack_napari._reader:napari_get_reader
+    - id: longitrack-napari.make_tracking_widget
+      title: Open the LongiSeg tracking widget
+      python_name: longitrack_napari._widget:LongiTrackWidget
+    - id: longitrack-napari.make_pantrack_pair
+      title: PanTrack baseline/follow-up pair
+      python_name: longitrack_napari._sample_data:make_pantrack_pair
+
+  readers:
+    - command: longitrack-napari.get_reader
+      accepts_directories: false
+      filename_patterns:
+        - "*.nii"
+        - "*.nii.gz"
+        - "*.nrrd"
+        - "*.mha"
+        - "*.mhd"
+        - "*.gipl"
+        - "*.gipl.gz"
+
+  widgets:
+    - command: longitrack-napari.make_tracking_widget
+      display_name: LongiSeg Tracking
+
+  sample_data:
+    - command: longitrack-napari.make_pantrack_pair
+      key: pantrack-pair
+      display_name: PanTrack baseline/follow-up pair (downloads ~0.6 GB)
