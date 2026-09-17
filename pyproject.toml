@@ -1,0 +1,106 @@
+[project]
+name = "longitrack-napari"
+version = "0.1.0"
+description = "Interactive napari viewer for point-prompted longitudinal lesion tracking with LongiSeg."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10,<3.13"
+authors = [
+    { name = "Yannick Kirchhoff", email = "yannick.kirchhoff@dkfz-heidelberg.de" },
+]
+keywords = [
+    "napari",
+    "longitudinal",
+    "lesion tracking",
+    "medical image segmentation",
+    "LongiSeg",
+    "nnU-Net",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Framework :: napari",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Healthcare Industry",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
+
+dependencies = [
+    # viewer
+    "napari[all]>=0.5.0",
+    "qtpy>=2.4",
+    "superqt>=0.6",
+    # tracking model + registration, see [tool.uv.sources] below
+    "longiseg[tracking]",
+    # cc3d is imported by longiseg.tracking but missing from its dependency list
+    "connected-components-3d>=3.12",
+    # model distribution
+    "huggingface-hub>=0.24",
+    # io / numerics
+    "SimpleITK>=2.2.1",
+    "numpy>=1.24",
+    "torch>=2.1.2",
+    "cryptography>=44",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-qt>=4.4",
+    "ruff>=0.6",
+]
+
+[project.urls]
+homepage = "https://github.com/MIC-DKFZ/LongiTrack-napari"
+repository = "https://github.com/MIC-DKFZ/LongiTrack-napari"
+"LongiSeg" = "https://github.com/MIC-DKFZ/LongiSeg"
+
+[project.scripts]
+longitrack-model = "longitrack_napari._cli:main"
+longitrack-napari = "longitrack_napari.app:main"
+longitrack-backend = "longitrack_napari.backend.server:main"
+create_remote_id = "longitrack_napari.remote_identity:create_main"
+push_remote_id = "longitrack_napari.remote_identity:push_main"
+create_and_push_remote_id = "longitrack_napari.remote_identity:create_and_push_main"
+
+[project.entry-points."napari.manifest"]
+longitrack-napari = "longitrack_napari:napari.yaml"
+
+# --- uv -----------------------------------------------------------------------
+# LongiSeg is not on PyPI, so it is pulled straight from the GitHub remote. To work
+# against a local clone instead, either edit this to
+#     longiseg = { path = "../longi-seg-pub", editable = true }
+# or, without touching this file, run
+#     uv sync && uv pip install -e ../longi-seg-pub
+[tool.uv.sources]
+longiseg = { git = "https://github.com/MIC-DKFZ/LongiSeg.git", branch = "master" }
+
+# torch resolves to the CUDA-enabled manylinux wheel from PyPI by default. For a
+# CPU-only install (much smaller), uncomment the following and add the index:
+# [[tool.uv.index]]
+# name = "pytorch-cpu"
+# url = "https://download.pytorch.org/whl/cpu"
+# explicit = true
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/longitrack_napari"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["B008"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
