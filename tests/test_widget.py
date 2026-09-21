@@ -130,6 +130,16 @@ def test_an_unmoved_prompt_keeps_its_follow_up_point(widget):
     assert widget._row_needs_registration(1, baseline_points), "the new prompt has never been registered"
 
 
+def test_focus_follows_a_newly_added_baseline_point(widget):
+    baseline = widget._prepare_baseline_points()
+    baseline.data = np.array([[150.0, 32, 32]])
+    baseline.mode = "add"
+
+    baseline.data = np.array([[150.0, 32, 32], [60.0, 12, 50]])
+
+    assert widget._focus == 1
+
+
 def test_a_moved_prompt_is_propagated_again(widget):
     prompt_layers(widget, [[151, 32, 32]], [[40, 30, 35]])
     widget._anchors = [[150, 32, 32]]
@@ -138,7 +148,7 @@ def test_a_moved_prompt_is_propagated_again(widget):
 
 def test_a_failed_propagation_keeps_the_prompts_paired(widget):
     # dropping the failure would leave 2 baseline and 1 follow-up point
-    from longitrack_napari.registration import PointPropagation
+    from longitrack_backend.registration import PointPropagation
 
     prompt_layers(widget, [[150, 32, 32], [160, 20, 20]], [])
     points = widget._baseline_points()
@@ -160,7 +170,7 @@ def test_a_failed_propagation_keeps_the_prompts_paired(widget):
 
 def propagate_two_prompts(widget):
     # one prompt propagated and kept, then a second one added on a far away slice
-    from longitrack_napari.registration import PointPropagation
+    from longitrack_backend.registration import PointPropagation
 
     prompt_layers(widget, [[150, 32, 32]], [])
     widget._on_propagated(([0], [PointPropagation([150, 32, 32], [40, 30, 35])]))
@@ -187,7 +197,7 @@ def test_placing_and_running_never_moves_the_baseline_point(widget):
 
 # ------------------------------------------------------------ point table ---
 def _propagation(baseline_point, followup_point):
-    from longitrack_napari.registration import PointPropagation
+    from longitrack_backend.registration import PointPropagation
 
     return PointPropagation(baseline_point, followup_point)
 
@@ -302,7 +312,7 @@ def test_on_model_loaded_does_not_wipe_lesions_while_a_session_job_is_running(wi
 
 # ------------------------------------------------ propagation vs. correction provenance -
 def test_a_correction_survives_a_later_unrelated_propagation(widget):
-    from longitrack_napari.registration import PointPropagation
+    from longitrack_backend.registration import PointPropagation
 
     prompt_layers(widget, [[150, 32, 32]], [])
     widget._on_propagated(([0], [PointPropagation([150, 32, 32], [40, 30, 35])]))
@@ -345,10 +355,17 @@ def test_segment_all_is_disabled_until_something_is_accepted(widget):
     assert widget.segment_button.isEnabled()
 
 
+def test_load_next_pair_is_disabled_until_a_pair_list_is_loaded(bare):
+    assert not bare.open_pair_button.isEnabled()
+
+    bare._pair_list = [{"baseline_scan": "a", "followup_scan": "b"}]
+    bare._refresh_action_buttons()
+    assert bare.open_pair_button.isEnabled()
+
+
 def test_track_all_propagates_accepts_and_segments_everything(bare, tmp_path, qtbot):
     import SimpleITK as sitk
-
-    from longitrack_napari.registration import PointPropagation
+    from longitrack_backend.registration import PointPropagation
 
     baseline_path, followup_path = tmp_path / "bl_0000.nii.gz", tmp_path / "fu_0000.nii.gz"
     sitk.WriteImage(sitk.GetImageFromArray(np.zeros((200, 64, 64), np.int16)), str(baseline_path))
@@ -391,8 +408,7 @@ def test_track_all_propagates_accepts_and_segments_everything(bare, tmp_path, qt
 
 def test_propagate_all_only_touches_rows_needing_registration(bare, tmp_path, qtbot):
     import SimpleITK as sitk
-
-    from longitrack_napari.registration import PointPropagation
+    from longitrack_backend.registration import PointPropagation
 
     baseline_path, followup_path = tmp_path / "bl_0000.nii.gz", tmp_path / "fu_0000.nii.gz"
     sitk.WriteImage(sitk.GetImageFromArray(np.zeros((200, 64, 64), np.int16)), str(baseline_path))
@@ -420,8 +436,7 @@ def test_propagate_all_only_touches_rows_needing_registration(bare, tmp_path, qt
 
 def test_segment_all_only_touches_accepted_rows(bare, tmp_path, qtbot):
     import SimpleITK as sitk
-
-    from longitrack_napari.registration import PointPropagation
+    from longitrack_backend.registration import PointPropagation
 
     baseline_path, followup_path = tmp_path / "bl_0000.nii.gz", tmp_path / "fu_0000.nii.gz"
     sitk.WriteImage(sitk.GetImageFromArray(np.zeros((200, 64, 64), np.int16)), str(baseline_path))
@@ -465,8 +480,7 @@ def test_segment_all_only_touches_accepted_rows(bare, tmp_path, qtbot):
 def test_segmenting_sends_the_hand_corrected_point_but_the_original_proposal(bare, tmp_path, qtbot):
     # the corrected point and the original proposal travel separately to the backend
     import SimpleITK as sitk
-
-    from longitrack_napari.registration import PointPropagation
+    from longitrack_backend.registration import PointPropagation
 
     baseline_path, followup_path = tmp_path / "bl_0000.nii.gz", tmp_path / "fu_0000.nii.gz"
     sitk.WriteImage(sitk.GetImageFromArray(np.zeros((200, 64, 64), np.int16)), str(baseline_path))
@@ -544,6 +558,89 @@ def test_unaccepting_a_segmented_row_removes_its_segmentation(widget):
     assert widget._baseline_points() == [[1, 2, 3]]
 
 
+def test_points_get_a_black_border_and_the_focused_one_is_highlighted(widget):
+    from longitrack_napari._widget import POINTS_LAYER
+
+    prompt_layers(widget, [[150, 32, 32], [60, 12, 50]], [[40, 30, 35], [15, 14, 48]])
+    widget._set_focus(1)
+
+    borders = np.asarray(widget._layer("followup", POINTS_LAYER["followup"]).border_color)
+    assert np.allclose(borders[0], [0.0, 0.0, 0.0, 1.0])
+    assert np.allclose(borders[1], [1.0, 1.0, 1.0, 1.0])
+
+
+def test_segmenting_a_lesion_keeps_its_point_visible(widget):
+    from longitrack_napari._widget import POINTS_LAYER
+
+    prompt_layers(widget, [[150, 32, 32]], [[40, 30, 35]])
+    widget._on_toggle_accept(0, True)
+    name = widget._add_labels("followup", np.zeros((80, 64, 64), np.uint16))
+    widget._lesions = ["1"]
+    widget._lesion_layers = {"1": {"followup": name}}
+    widget._refresh_point_table()
+
+    assert bool(widget._layer("followup", POINTS_LAYER["followup"]).shown[0])
+
+
+def test_the_focused_lesions_mask_is_brighter(widget):
+    prompt_layers(widget, [[150, 32, 32], [60, 12, 50]], [[40, 30, 35], [15, 14, 48]])
+    name0 = widget._add_labels("followup", np.zeros((80, 64, 64), np.uint16), suffix="1")
+    name1 = widget._add_labels("followup", np.zeros((80, 64, 64), np.uint16), suffix="2")
+    widget._lesions = ["1", "2"]
+    widget._lesion_layers = {"1": {"followup": name0}, "2": {"followup": name1}}
+
+    widget._set_focus(1)
+
+    assert widget._layer("followup", name1).opacity > widget._layer("followup", name0).opacity
+
+
+def test_a_segmented_lesions_point_is_drawn_above_its_mask(widget):
+    from longitrack_napari._widget import POINTS_LAYER
+
+    prompt_layers(widget, [[150, 32, 32]], [[40, 30, 35]])
+    name = widget._add_labels("followup", np.zeros((80, 64, 64), np.uint16))
+
+    layers = widget.vm["followup"].layers
+    points = widget._layer("followup", POINTS_LAYER["followup"])
+    assert layers.index(points) > layers.index(widget._layer("followup", name)), (
+        "the mask must not be drawn on top of the point, or its border becomes invisible"
+    )
+
+
+def test_a_segmented_points_fill_is_transparent(widget):
+    from longitrack_napari._widget import POINTS_LAYER
+
+    prompt_layers(widget, [[150, 32, 32], [60, 12, 50]], [[40, 30, 35], [15, 14, 48]])
+    name = widget._add_labels("followup", np.zeros((80, 64, 64), np.uint16))
+    widget._lesions = ["1", None]
+    widget._lesion_layers = {"1": {"followup": name}}
+    widget._refresh_point_table()
+
+    layer = widget._layer("followup", POINTS_LAYER["followup"])
+    alphas = np.asarray(layer.face_color)[:, 3]
+    assert alphas[0] == 0.0
+    assert alphas[1] == 1.0
+
+
+def test_mask_color_matches_the_row_regardless_of_segmentation_order(widget):
+    from longitrack_napari._widget import LESION_COLORS
+
+    prompt_layers(
+        widget,
+        [[150, 32, 32], [60, 12, 50], [10, 10, 10]],
+        [[40, 30, 35], [15, 14, 48], [5, 5, 5]],
+    )
+    name_row2 = widget._add_labels("followup", np.ones((80, 64, 64), np.uint16), suffix="1", row=2)
+    widget._lesions = [None, None, "1"]
+    name_row0 = widget._add_labels("followup", np.ones((80, 64, 64), np.uint16), suffix="2", row=0)
+    widget._lesions = ["2", None, "1"]
+
+    color_row2 = widget._layer("followup", name_row2).colormap.color_dict[1]
+    color_row0 = widget._layer("followup", name_row0).colormap.color_dict[1]
+    assert np.allclose(color_row2, LESION_COLORS[2])
+    assert np.allclose(color_row0, LESION_COLORS[0])
+
+
 def test_delete_registration_resets_the_row_to_unregistered(widget):
     baseline, followup = prompt_layers(widget, [[150, 32, 32]], [[40, 30, 35]])
     widget._anchors = [[150, 32, 32]]
@@ -594,7 +691,7 @@ def test_a_cancelled_jobs_late_result_is_dropped(widget):
 def test_cancelling_track_all_does_not_contaminate_a_later_propagate(widget):
     # cancelling before Track's propagate callback runs must not leave its flag stuck,
     # or a later Propagate would continue into accept-and-segment on its own
-    from longitrack_napari.registration import PointPropagation
+    from longitrack_backend.registration import PointPropagation
 
     prompt_layers(widget, [[150, 32, 32]], [])
     widget._track_all_pending = True
@@ -663,3 +760,115 @@ def test_editing_a_proposal_moves_the_point_to_the_clicked_position(widget):
     widget._on_verify_accept()
     assert widget._accepted[0]
     assert widget._followup_points()[0] == [20, 25, 25]
+
+
+def test_editing_an_already_accepted_point_actually_sticks(widget):
+    from longitrack_napari._widget import POINTS_LAYER
+
+    prompt_layers(widget, [[150, 32, 32]], [[40, 30, 35]])
+    widget._on_toggle_accept(0, True)
+    widget._on_table_clicked(0)  # reopens Accept/Edit/Skip for the accepted row
+    widget._on_verify_edit()
+
+    layer = widget._layer("followup", POINTS_LAYER["followup"])
+    layer.data = np.vstack([np.asarray(layer.data), [[20.0, 25, 25]]])  # what a click does
+
+    assert widget._followup_points()[0] == [20, 25, 25], "must not snap back to the locked point"
+
+
+def test_clicking_a_row_reopens_verification_for_an_accepted_point(widget):
+    prompt_layers(widget, [[150, 32, 32]], [[40, 30, 35]])
+    widget._on_toggle_accept(0, True)
+    assert widget._verify_rows == []
+
+    widget._on_table_clicked(0)
+
+    assert widget._verify_rows == [0]
+    assert widget.verify_edit_button.isEnabled()
+    assert "accepted" in widget.verify_label.text()
+
+
+def test_clicking_a_segmented_row_does_not_reopen_verification(widget):
+    prompt_layers(widget, [[150, 32, 32]], [[40, 30, 35]])
+    widget._on_toggle_accept(0, True)
+    name = widget._add_labels("followup", np.zeros((80, 64, 64), np.uint16))
+    widget._lesions = ["1"]
+    widget._lesion_layers = {"1": {"followup": name}}
+
+    widget._on_table_clicked(0)
+
+    assert widget._verify_rows == [], "nothing left to accept, edit or skip once it's segmented"
+
+
+def test_clicking_a_different_row_keeps_the_pending_ones_queued(widget):
+    prompt_layers(widget, [[150, 32, 32], [60, 12, 50], [10, 10, 10]], [[40, 30, 35], [15, 14, 48], [5, 5, 5]])
+    widget._begin_verification([0, 1])
+    widget._on_toggle_accept(2, True)  # row 2 is done and not part of the pending walk
+
+    widget._on_table_clicked(2)
+    assert widget._verify_rows == [2, 0, 1]
+
+    widget._on_verify_skip()
+    assert widget._verify_rows == [0, 1], "the original walk resumes once the detour is dismissed"
+
+
+
+# ------------------------------------------------- switching the backend mode -
+class _FakeRunningBackend:
+    """A backend that is up, in one mode or the other."""
+
+    def __init__(self, remote: bool):
+        self.is_remote = remote
+
+    def is_running(self) -> bool:
+        return True
+
+
+def test_selecting_remote_while_local_runs_opens_the_connect_dialog_once(bare, monkeypatch):
+    # regression: _set_backend_mode used to re-enter the handler, so confirming the
+    # dialog re-opened it, and cancelling out of the loop dropped back to Local
+    bare._backend = _FakeRunningBackend(remote=False)
+    calls = []
+    monkeypatch.setattr(type(bare), "_on_connect_remote_server", lambda _self, **kw: calls.append(kw))
+
+    # drive it the way the user does, through the combo box
+    bare.backend_mode.setCurrentIndex(1)
+    bare.backend_mode.activated.emit(1)
+
+    assert calls == [{"switching": True}]
+
+
+def test_showing_a_decided_mode_does_not_start_a_switch(bare, monkeypatch):
+    bare._backend = _FakeRunningBackend(remote=False)
+    monkeypatch.setattr(
+        type(bare), "_on_connect_remote_server", lambda _self, **_kw: pytest.fail("must not reconnect")
+    )
+
+    bare._set_backend_mode(True)
+
+    assert bare._remote_mode()
+    assert bare.remote_endpoint_widget.isVisibleTo(bare)
+
+
+def test_selecting_remote_with_no_backend_running_still_offers_the_connect_dialog(bare, monkeypatch):
+    calls = []
+    monkeypatch.setattr(type(bare), "_on_connect_remote_server", lambda _self, **kw: calls.append(kw))
+
+    bare._on_backend_mode_selected(1)
+
+    assert calls == [{"switching": False}]
+
+
+def test_selecting_local_without_a_local_backend_reverts_to_remote(bare, monkeypatch):
+    bare._backend = _FakeRunningBackend(remote=True)
+    monkeypatch.setattr(type(bare), "_local_backend_available", staticmethod(lambda: False))
+    monkeypatch.setattr(
+        type(bare), "_start_local_backend_warmup", lambda _self, **_kw: pytest.fail("no local backend to start")
+    )
+    errors = []
+    monkeypatch.setattr(type(bare), "_error", lambda _self, title, error: errors.append(title))
+
+    bare._on_backend_mode_selected(0)
+
+    assert errors == ["No local backend"]
+    assert bare._remote_mode()

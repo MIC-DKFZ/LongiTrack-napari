@@ -357,7 +357,9 @@ class LongiTrackWidget(QWidget):
 
         self.backend_mode = QComboBox()  # internal state: 0 local, 1 remote
         self.backend_mode.addItems(["Local process", "Remote TCP server"])
-        self.backend_mode.currentIndexChanged.connect(self._on_backend_mode_changed)
+        # currentIndexChanged also fires when code sets the mode; only `activated` is the user
+        self.backend_mode.currentIndexChanged.connect(self._update_backend_mode_widgets)
+        self.backend_mode.activated.connect(self._on_backend_mode_selected)
         self.backend_status = QLabel("Local backend")
         self.backend_status.setStyleSheet("color: gray;")
         form.addRow("Backend", self.backend_mode)
@@ -415,7 +417,7 @@ class LongiTrackWidget(QWidget):
         if endpoint:
             self.remote_host.setText(endpoint)
             self.backend_mode.setCurrentIndex(1)
-        self._on_backend_mode_changed(self.backend_mode.currentIndex())
+        self._update_backend_mode_widgets()
 
         self.load_model_button = QPushButton("Initialize model")
         self.load_model_button.setToolTip("Downloads the model if needed and gets it ready to segment.")
@@ -764,21 +766,33 @@ class LongiTrackWidget(QWidget):
         return importlib.util.find_spec("torch") is not None
 
     def _set_backend_mode(self, remote: bool) -> None:
-        self.backend_mode.blockSignals(True)
+        """Show a decided mode without re-running the switch it implies."""
         self.backend_mode.setCurrentIndex(1 if remote else 0)
-        self.backend_mode.blockSignals(False)
-        self._on_backend_mode_changed(self.backend_mode.currentIndex())
 
-    def _on_backend_mode_changed(self, index: int) -> None:
-        remote = index == 1
+    def _update_backend_mode_widgets(self, _index: int | None = None) -> None:
+        remote = self._remote_mode()
         self.remote_endpoint_widget.setVisible(remote)
         self.remote_notice.setVisible(remote)
-        if not self._backend.is_running() or remote == self._backend.is_remote:
+
+    def _on_backend_mode_selected(self, index: int) -> None:
+        """The user picked a mode: connect to, or start, that backend."""
+        remote = index == 1
+        running = self._backend.is_running()
+        if running and remote == self._backend.is_remote:
             return
         if remote:
-            self._on_connect_remote_server(switching=True)
-        else:
-            self._start_local_backend_warmup(switching=True)
+            # nothing running means nothing to revert to: a cancelled dialog leaves the
+            # box on Remote, and picking Remote again re-opens it
+            self._on_connect_remote_server(switching=running)
+            return
+        if not self._local_backend_available():
+            self._error(
+                "No local backend",
+                RuntimeError("This install has no GPU backend; only a remote server can run the model."),
+            )
+            self._set_backend_mode(True)
+            return
+        self._start_local_backend_warmup(switching=running)
 
     def _ask_backend_startup_mode(self) -> None:
         """Start remote setup immediately in a lightweight client-only installation."""
