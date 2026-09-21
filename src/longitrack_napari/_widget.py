@@ -43,6 +43,7 @@ from qtpy.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSlider,
+    QSpinBox,
     QSplitter,
     QStyle,
     QTableWidget,
@@ -54,6 +55,7 @@ from qtpy.QtWidgets import (
 )
 
 from ._reader import SUPPORTED_SUFFIXES
+from ._windowing import CUSTOM, DEFAULT_PRESET, FULL_RANGE, PRESETS, WindowLevel, from_limits, preset_for
 
 BASELINE_POINTS = "baseline prompt"
 FOLLOWUP_POINTS = "follow-up prompt"
@@ -492,10 +494,95 @@ class LongiTrackWidget(QWidget):
         self.pantrack_button.clicked.connect(self._on_load_pantrack)
         scan_actions.addWidget(self.pantrack_button)
 
+        grid.addLayout(self._build_window_level_row(), 3, 0, 1, 4)
+
         scan_action_row = QWidget()
         scan_action_row.setLayout(scan_actions)
-        grid.addWidget(scan_action_row, 3, 0, 1, 4)
+        grid.addWidget(scan_action_row, 4, 0, 1, 4)
         return box
+
+    def _build_window_level_row(self) -> QHBoxLayout:
+        """One window/level for both canvases, so a lesion looks the same in each."""
+        self.window_preset = QComboBox()
+        self.window_preset.addItems([*PRESETS, FULL_RANGE, CUSTOM])
+        self.window_preset.setCurrentText(DEFAULT_PRESET)
+        self.window_preset.setToolTip("Hounsfield window applied to both scans at once.")
+        self.window_preset.activated.connect(self._on_window_preset_selected)
+
+        self.window_width = QSpinBox()
+        self.window_width.setRange(1, 4000)
+        self.window_width.setSingleStep(10)
+        self.window_width.setToolTip("Window width in HU: how much of the scale is shown.")
+        self.window_level = QSpinBox()
+        self.window_level.setRange(-1024, 3071)
+        self.window_level.setSingleStep(10)
+        self.window_level.setToolTip("Window centre in HU: where on the scale it sits.")
+        for box in (self.window_width, self.window_level):
+            box.setMaximumWidth(70)
+            box.setKeyboardTracking(False)
+            box.valueChanged.connect(self._on_window_level_edited)
+        self._set_window_level_boxes(PRESETS[DEFAULT_PRESET])
+
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(QLabel("Window"))
+        row.addWidget(self.window_preset, stretch=1)
+        row.addWidget(QLabel("W"))
+        row.addWidget(self.window_width)
+        row.addWidget(QLabel("L"))
+        row.addWidget(self.window_level)
+        return row
+
+    def _set_window_level_boxes(self, window_level: WindowLevel) -> None:
+        for box, value in ((self.window_width, window_level.window), (self.window_level, window_level.level)):
+            box.blockSignals(True)
+            box.setValue(value)
+            box.blockSignals(False)
+
+    def _on_window_preset_selected(self, _index: int) -> None:
+        name = self.window_preset.currentText()
+        if name == FULL_RANGE:
+            self._apply_full_range()
+            return
+        if name == CUSTOM:
+            return
+        self._set_window_level_boxes(PRESETS[name])
+        self._apply_window_level()
+
+    def _on_window_level_edited(self, _value: int) -> None:
+        self.window_preset.setCurrentText(preset_for(self._current_window_level()))
+        self._apply_window_level()
+
+    def _current_window_level(self) -> WindowLevel:
+        return WindowLevel(self.window_width.value(), self.window_level.value())
+
+    def _apply_window_level(self, layers=None) -> None:
+        limits = self._current_window_level().limits
+        for layer in self._window_targets(layers):
+            layer.contrast_limits_range = (
+                min(limits[0], layer.contrast_limits_range[0]),
+                max(limits[1], layer.contrast_limits_range[1]),
+            )
+            layer.contrast_limits = limits
+
+    def _apply_full_range(self, layers=None) -> None:
+        """Each scan over its own min/max -- the escape hatch when HU do not apply."""
+        targets = self._window_targets(layers)
+        for layer in targets:
+            data = np.asarray(layer.data)
+            low, high = float(data.min()), float(data.max())
+            if high <= low:  # a constant image: napari rejects a zero-width range
+                high = low + 1.0
+            layer.contrast_limits_range = layer.contrast_limits = (low, high)
+        if targets:
+            self._set_window_level_boxes(from_limits(*targets[0].contrast_limits))
+
+    def _window_targets(self, layers=None) -> list:
+        # display state, not session state: every image on a canvas gets the window, including
+        # one opened while a job was in flight, which leaves self._ct unbound on purpose
+        if layers is not None:
+            return [layer for layer in layers if layer is not None]
+        return [layer for role in ROLES for layer in self.vm[role].layers if isinstance(layer, Image)]
 
     def _icon_button(self, pixmap, tooltip: str) -> QPushButton:
         button = QPushButton("")
@@ -1022,6 +1109,7 @@ class LongiTrackWidget(QWidget):
             return
         previous = self._ct[role]
         self._ct[role] = layer
+        self._apply_window_level([layer])
         self._reset_session()
         self._refresh_scan_labels()
         if previous is not None and (previous_path := layer_path(previous)) is not None:

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from longitrack_backend.pantrack import DEFAULT_PATIENT, ScanPair, download_pair
 
-CT_WINDOW = (-150.0, 250.0)
+from ._windowing import DEFAULT_WINDOW
+
+CT_WINDOW = DEFAULT_WINDOW.limits
 
 
 def pair_to_layers(pair: ScanPair) -> list[tuple]:

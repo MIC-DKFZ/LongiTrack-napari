@@ -878,3 +878,75 @@ def test_selecting_local_without_a_local_backend_reverts_to_remote(bare, monkeyp
 
     assert errors == ["No local backend"]
     assert bare._remote_mode()
+
+
+# ------------------------------------------------------- window/level control -
+def test_a_preset_applies_the_same_window_to_both_scans(widget):
+    from longitrack_napari._windowing import PRESETS
+
+    widget.window_preset.setCurrentText("Lung")
+    widget._on_window_preset_selected(0)
+
+    for role in ("baseline", "followup"):
+        assert tuple(widget._ct[role].contrast_limits) == PRESETS["Lung"].limits
+    assert widget.window_width.value() == PRESETS["Lung"].window
+    assert widget.window_level.value() == PRESETS["Lung"].level
+
+
+def test_editing_width_or_level_switches_the_preset_to_custom(widget):
+    from longitrack_napari._windowing import CUSTOM
+
+    widget.window_width.setValue(333)
+
+    assert widget.window_preset.currentText() == CUSTOM
+    assert tuple(widget._ct["baseline"].contrast_limits) == (50 - 333 / 2, 50 + 333 / 2)
+
+
+def test_typing_a_presets_numbers_names_that_preset(widget):
+    widget.window_width.setValue(1500)
+    widget.window_level.setValue(-600)
+
+    assert widget.window_preset.currentText() == "Lung"
+
+
+def test_a_newly_opened_scan_takes_the_current_window(widget):
+    import numpy as np
+
+    widget.window_width.setValue(400)
+    widget.window_level.setValue(50)
+
+    fresh = widget.vm["baseline"].add_image(np.zeros((8, 8, 8), np.int16), name="new baseline")
+
+    assert widget._ct["baseline"] is fresh
+    assert tuple(fresh.contrast_limits) == (-150.0, 250.0)
+
+
+def test_full_range_falls_back_to_the_data_for_non_ct(widget):
+    import numpy as np
+
+    from longitrack_napari._windowing import FULL_RANGE
+
+    widget._ct["baseline"].data = np.linspace(0, 900, 8 * 8 * 8).reshape(8, 8, 8).astype(np.int16)
+    widget.window_preset.setCurrentText(FULL_RANGE)
+    widget._on_window_preset_selected(0)
+
+    low, high = widget._ct["baseline"].contrast_limits
+    assert (round(low), round(high)) == (0, 900)
+
+
+def test_a_scan_opened_while_busy_still_takes_the_window(widget):
+    import numpy as np
+
+    # _on_role_layer_inserted deliberately leaves _ct unbound while a job runs; the window is
+    # a display property and must not depend on that binding
+    widget._busy = True
+    stranded = widget.vm["baseline"].add_image(np.zeros((8, 8, 8), np.int16), name="opened while busy")
+    widget._busy = False
+    assert widget._ct["baseline"] is not stranded, "precondition: the layer is not bound to the session"
+
+    widget.window_preset.setCurrentText("Bone")
+    widget._on_window_preset_selected(0)
+
+    from longitrack_napari._windowing import PRESETS
+
+    assert tuple(stranded.contrast_limits) == PRESETS["Bone"].limits

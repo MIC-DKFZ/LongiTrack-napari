@@ -140,6 +140,23 @@ baseline included.
 
 ### Options
 
+**Window/Level** -- one Hounsfield window for *both* scans at once, so a lesion looks the same
+on each side. Pick a preset or type a width and centre; typing numbers that match a preset names
+it again.
+
+| Preset | Width | Centre |
+| --- | --- | --- |
+| Lesion *(default)* | 200 | 50 |
+| Abdomen | 400 | 50 |
+| Liver | 150 | 60 |
+| Lung | 1500 | -600 |
+| Bone | 2000 | 400 |
+| Brain | 80 | 40 |
+
+*Full range* stretches each scan over its own min/max instead, for data that is not in HU. A
+scan opened later takes whatever is set. Each canvas also keeps napari's own contrast slider
+under *Image controls*, for windowing the two differently.
+
 **Speed/Quality slider** -- five stops, starting on *Balanced*:
 
 | Stop | Registration refinement | Segmentation TTA |
