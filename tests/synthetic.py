@@ -4,8 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
-
-from longitrack_napari._env import CACHE_DIR
+from longitrack_backend._env import CACHE_DIR
 
 SHAPE = (64, 160, 160)
 SPACING_ZYX = (3.0, 1.0, 1.0)

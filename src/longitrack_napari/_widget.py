@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import queue
@@ -9,6 +10,11 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
+from longitrack_backend.geometry import snap_to_volume
+from longitrack_backend.model import DEFAULT_REPO_ID
+from longitrack_backend.pantrack import DEFAULT_PAIR_INDEX as PANTRACK_PAIR
+from longitrack_backend.pantrack import DEFAULT_PATIENT as PANTRACK_PATIENT
+from longitrack_backend.remote_identity import IDENTITY_DIR
 from napari.components import ViewerModel
 from napari.layers import Image, Points
 from qtpy.QtCore import QObject, QSize, Qt, QTimer, Signal
@@ -48,10 +54,6 @@ from qtpy.QtWidgets import (
 )
 
 from ._reader import SUPPORTED_SUFFIXES
-from .geometry import snap_to_volume
-from .model import DEFAULT_REPO_ID
-from .pantrack import DEFAULT_PAIR_INDEX as PANTRACK_PAIR
-from .pantrack import DEFAULT_PATIENT as PANTRACK_PATIENT
 
 BASELINE_POINTS = "baseline prompt"
 FOLLOWUP_POINTS = "follow-up prompt"
@@ -358,9 +360,10 @@ class LongiTrackWidget(QWidget):
         self.backend_mode.currentIndexChanged.connect(self._on_backend_mode_changed)
         self.backend_status = QLabel("Local backend")
         self.backend_status.setStyleSheet("color: gray;")
-        form.addRow("Backend", self.backend_status)
+        form.addRow("Backend", self.backend_mode)
+        form.addRow("Status", self.backend_status)
 
-        self.remote_host = QLineEdit("127.0.0.1")
+        self.remote_host = QLineEdit()
         self.remote_host.setPlaceholderText("GPU server host name")
         self.remote_port = QLineEdit(str(REMOTE_BACKEND_PORT))
         self.test_remote_button = QPushButton("Test connection")
@@ -379,7 +382,9 @@ class LongiTrackWidget(QWidget):
         self.remote_notice.setWordWrap(True)
         self.remote_notice.setStyleSheet("color: #8a6d3b;")
         self.remote_notice.setVisible(False)
-        self._remote_private_key = str(Path.home() / ".config" / "longitrack-napari" / "remote" / "id_ed25519")
+        form.addRow("Remote server", self.remote_endpoint_widget)
+        form.addRow(self.remote_notice)
+        self._remote_private_key = str(IDENTITY_DIR / "id_ed25519")
 
         self.model_source = QComboBox()
         self.model_source.addItems(["Hugging Face Hub", "Local folder"])
@@ -454,30 +459,37 @@ class LongiTrackWidget(QWidget):
         self.image_status.setStyleSheet("color: gray;")
         grid.addWidget(self.image_status, 2, 0, 1, 4)
 
-        # optional JSON list of pairs, stepped through one per click
-        scan_actions = QHBoxLayout()
+        # two rows, so neither needs to fit all three of these longer labels at once
+        scan_actions = QVBoxLayout()
         scan_actions.setContentsMargins(0, 0, 0, 0)
-        self.load_pair_list_button = QPushButton("Pair list...")
+
+        # optional JSON list of pairs, stepped through one per click
+        self.load_pair_list_button = QPushButton("Upload pair list")
         self.load_pair_list_button.setToolTip(
-            "Loads a JSON list of baseline/follow-up scan pairs; 'Load next scan pair' then "
+            "Loads a JSON list of baseline/follow-up scan pairs; 'Load next pair' then "
             "opens them in order without asking each time."
         )
         self.load_pair_list_button.clicked.connect(self._on_load_pair_list)
-        scan_actions.addWidget(self.load_pair_list_button)
 
         # replaces both scans at once, so a new baseline never pairs with an old follow-up
-        self.open_pair_button = QPushButton("Next pair...")
+        self.open_pair_button = QPushButton("Load next pair")
         self.open_pair_button.setToolTip(
             "Opens a new baseline and follow-up scan together, resetting the session. Takes "
             "the next entry from a loaded pair list if there is one, otherwise asks for both scans."
         )
         self.open_pair_button.clicked.connect(self._on_open_pair)
-        scan_actions.addWidget(self.open_pair_button)
 
-        self.pantrack_button = QPushButton("Example")
+        top_row = QHBoxLayout()
+        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.addWidget(self.load_pair_list_button)
+        top_row.addWidget(self.open_pair_button)
+        scan_actions.addLayout(top_row)
+
+        self.pantrack_button = QPushButton("Load PanTrack example")
         self.pantrack_button.setToolTip(f"Downloads and opens a sample case from {PANTRACK_PATIENT}.")
         self.pantrack_button.clicked.connect(self._on_load_pantrack)
         scan_actions.addWidget(self.pantrack_button)
+
         scan_action_row = QWidget()
         scan_action_row.setLayout(scan_actions)
         grid.addWidget(scan_action_row, 3, 0, 1, 4)
@@ -679,7 +691,6 @@ class LongiTrackWidget(QWidget):
             self.add_point_button,
             self.clear_points_button,
             self.load_pair_list_button,
-            self.open_pair_button,
             self.pantrack_button,
             self.point_table,
             *(button for pair in self.scan_buttons.values() for button in pair),
@@ -747,17 +758,36 @@ class LongiTrackWidget(QWidget):
     def _remote_mode(self) -> bool:
         return self.backend_mode.currentIndex() == 1
 
+    @staticmethod
+    def _local_backend_available() -> bool:
+        """A remote-only install intentionally omits Torch."""
+        return importlib.util.find_spec("torch") is not None
+
+    def _set_backend_mode(self, remote: bool) -> None:
+        self.backend_mode.blockSignals(True)
+        self.backend_mode.setCurrentIndex(1 if remote else 0)
+        self.backend_mode.blockSignals(False)
+        self._on_backend_mode_changed(self.backend_mode.currentIndex())
+
     def _on_backend_mode_changed(self, index: int) -> None:
         remote = index == 1
-        if self._backend.is_running() and remote != self._backend.is_remote:
-            self.backend_mode.blockSignals(True)
-            self.backend_mode.setCurrentIndex(1 if self._backend.is_remote else 0)
-            self.backend_mode.blockSignals(False)
-            self._log("Restart the plugin to switch backend.")
+        self.remote_endpoint_widget.setVisible(remote)
+        self.remote_notice.setVisible(remote)
+        if not self._backend.is_running() or remote == self._backend.is_remote:
+            return
+        if remote:
+            self._on_connect_remote_server(switching=True)
+        else:
+            self._start_local_backend_warmup(switching=True)
 
     def _ask_backend_startup_mode(self) -> None:
-        """Ask once whether this napari instance owns compute or is a remote client."""
+        """Start remote setup immediately in a lightweight client-only installation."""
         if self._backend.is_running():
+            return
+        if not self._local_backend_available():
+            self._set_backend_mode(True)
+            self.backend_status.setText("Remote: not connected")
+            self._on_connect_remote_server()
             return
         dialog = QMessageBox(self)
         dialog.setWindowTitle("LongiTrack backend")
@@ -769,15 +799,32 @@ class LongiTrackWidget(QWidget):
         if dialog.clickedButton() is local:
             self._start_local_backend_warmup()
         else:
-            self.backend_mode.setCurrentIndex(1)
+            self._set_backend_mode(True)
             self.backend_status.setText("Remote: not connected")
             self._on_connect_remote_server()
 
-    def _start_local_backend_warmup(self) -> None:
+    def _replace_backend(self) -> None:
+        """Close the current client/session before changing backend modes."""
+        from .backend.client import BackendClient
+
+        old_backend = self._backend
+        self._scan_upload_generation += 1
+        self._segmentation_preload_paths.clear()
+        self._preload_paths.clear()
+        self._scan_upload_futures.clear()
+        self._backend_scan_paths.clear()
+        old_backend.cancel_active()
+        old_backend.shutdown()
+        self._backend = BackendClient()
+        self._backend_initialized = False
+        self._log("Switched backend; scans and model will be prepared again on the selected backend.")
+
+    def _start_local_backend_warmup(self, *, switching: bool = False) -> None:
         def work():
+            if switching:
+                self._replace_backend()
             self._configure_backend(False, None)
             self._backend.ensure_started(progress=self._emit)
-            # registration does not depend on the segmentation model, so warm it first
             try:
                 self._backend.warm_up_registration(progress=self._emit)
             except Exception as error:  # noqa: BLE001 - a warm-up must never fail start-up
@@ -785,6 +832,7 @@ class LongiTrackWidget(QWidget):
 
         def ready(_result=None) -> None:
             self.backend_status.setText("Local backend ready")
+            self.backend_status.setStyleSheet("color: #3c763d;")
             self._log("Local backend ready: registration warmed, model not loaded yet.")
 
         self._start_model(work, ready, "Local backend startup failed", "Starting local backend")
@@ -795,31 +843,20 @@ class LongiTrackWidget(QWidget):
 
     def _configure_backend(self, remote: bool, endpoint: tuple[str, int] | None) -> None:
         if not remote:
-            if self._backend.is_remote:
-                raise RuntimeError(
-                    "This widget is already connected to a remote backend; restart it to use local mode."
-                )
             return
         if self._backend.is_running():
-            if not self._backend.is_remote:
-                raise RuntimeError("This widget already owns a local backend; restart it to use a remote server.")
             return
         if endpoint is None:
             raise RuntimeError("Remote backend endpoint was not configured.")
-        self._backend.connect_tcp(
-            *endpoint,
-            private_key=self._remote_private_key,
-        )
+        self._backend.connect_tcp(*endpoint, private_key=self._remote_private_key)
 
-    def _on_connect_remote_server(self) -> None:
-        if self._backend.is_running() and self._backend_initialized:
-            self._log("Restart the plugin to switch backend.")
-            return
+    def _on_connect_remote_server(self, *, switching: bool = False) -> None:
+        previous_remote = self._backend.is_remote if self._backend.is_running() else False
         dialog = QDialog(self)
         dialog.setWindowTitle("Connect remote LongiTrack server")
         form = QFormLayout(dialog)
         host = QLineEdit(self.remote_host.text())
-        key_dir = Path.home() / ".config" / "longitrack-napari" / "remote"
+        key_dir = IDENTITY_DIR
         private_keys = []
         if key_dir.is_dir():
             private_keys = sorted(path.name for path in key_dir.iterdir() if path.is_file() and path.suffix != ".pub")
@@ -828,6 +865,8 @@ class LongiTrackWidget(QWidget):
                 "No remote identity",
                 RuntimeError("Create one first: uv run create_remote_id --name <server-name>"),
             )
+            if switching:
+                self._set_backend_mode(previous_remote)
             return
         private_key = QComboBox()
         private_key.addItems(private_keys)
@@ -845,20 +884,28 @@ class LongiTrackWidget(QWidget):
         buttons.rejected.connect(dialog.reject)
         form.addRow(buttons)
         if dialog.exec() != QDialog.DialogCode.Accepted:
+            if switching:
+                self._set_backend_mode(previous_remote)
             return
         try:
             endpoint = (self._normalise_remote_host(host.text()), REMOTE_BACKEND_PORT)
             key_path = key_dir / private_key.currentText()
         except ValueError as error:
             self._error("Invalid remote backend", error)
+            if switching:
+                self._set_backend_mode(previous_remote)
             return
         self.remote_host.setText(endpoint[0])
-        if self._backend.is_running():
-            self._discard_prefetch_backend()
         self._remote_private_key = str(key_path)
-        self.backend_mode.setCurrentIndex(1)
+        self._set_backend_mode(True)
+
+        def work():
+            if switching:
+                self._replace_backend()
+            self._configure_backend(True, endpoint)
+
         self._start_model(
-            lambda: self._configure_backend(True, endpoint),
+            work,
             lambda _: self._on_remote_connected(*endpoint),
             "Remote backend connection failed",
             "Connecting to remote backend",
@@ -985,7 +1032,7 @@ class LongiTrackWidget(QWidget):
         emit = self._emit
 
         def work():
-            from .pantrack import download_pair
+            from longitrack_backend.pantrack import download_pair
 
             return download_pair(patient=PANTRACK_PATIENT, pair_index=PANTRACK_PAIR, progress=emit)
 
@@ -1175,7 +1222,8 @@ class LongiTrackWidget(QWidget):
         self._queue_scan_preloads(
             [scan for pair in pairs for scan in (pair["baseline_scan"], pair["followup_scan"])]
         )
-        self._log(f"Loaded {len(pairs)} scan pair(s) from {path}. Click 'Load next scan pair' to open the first one.")
+        self._refresh_action_buttons()
+        self._log(f"Loaded {len(pairs)} scan pair(s) from {path}. Click 'Load next pair' to open the first one.")
 
     @staticmethod
     def _parse_pair_list(path: Path) -> list[dict[str, str]]:
@@ -1245,9 +1293,9 @@ class LongiTrackWidget(QWidget):
         )
         empty = np.empty((0, reference.data.ndim))
         try:
-            layer = self.vm[role].add_points(empty, border_color="white", **kwargs)
+            layer = self.vm[role].add_points(empty, border_color="black", **kwargs)
         except TypeError:  # napari < 0.5 called it edge_color
-            layer = self.vm[role].add_points(empty, edge_color="white", **kwargs)
+            layer = self.vm[role].add_points(empty, edge_color="black", **kwargs)
         self._connect_points(role, layer)
         self._refresh_point_table()
         return layer
@@ -1269,20 +1317,40 @@ class LongiTrackWidget(QWidget):
         custom = self._get_at(self._custom_colors, row, None)
         if custom is not None:
             return np.asarray(custom, dtype=float)
-        lesion_id = self._get_at(self._lesions, row, None)
-        try:
-            color_index = int(lesion_id) - 1 if lesion_id is not None else row
-        except ValueError:
-            color_index = row
-        return LESION_COLORS[color_index % len(LESION_COLORS)]
+        return LESION_COLORS[row % len(LESION_COLORS)]
 
     def _apply_prompt_colors(self) -> None:
-        """Keep every row's two prompt markers in the same categorical color."""
+        """Keep every row's two prompt markers in the same categorical color, focused one highlighted."""
         for role in ROLES:
             layer = self._layer(role, POINTS_LAYER[role])
             if not isinstance(layer, Points) or not len(layer.data):
                 continue
-            layer.face_color = np.asarray([self._row_color(row) for row in range(len(layer.data))], dtype=float)
+            rows = range(len(layer.data))
+            face_colors = []
+            for row in rows:
+                color = np.asarray(self._row_color(row), dtype=float)
+                if self._row_has_mask(row, role):
+                    color = color.copy()
+                    color[3] = 0.0
+                face_colors.append(color)
+            layer.face_color = np.asarray(face_colors, dtype=float)
+            layer.border_color = np.asarray(
+                [(1.0, 1.0, 1.0, 1.0) if row == self._focus else (0.0, 0.0, 0.0, 1.0) for row in rows], dtype=float
+            )
+            layer.border_width = 0.1
+
+    def _apply_mask_highlight(self) -> None:
+        """Brighten the focused lesion's mask relative to the rest."""
+        for row, lesion_id in enumerate(self._lesions):
+            if lesion_id is None:
+                continue
+            for layer in self._row_lesion_layers(row):
+                layer.opacity = 0.85 if row == self._focus else 0.55
+
+    def _set_focus(self, row: int) -> None:
+        self._focus = row
+        self._apply_prompt_colors()
+        self._apply_mask_highlight()
 
     @staticmethod
     def _mask_colormap(data: np.ndarray, color: np.ndarray):
@@ -1338,8 +1406,13 @@ class LongiTrackWidget(QWidget):
         # nothing is invalidated here: a row's status is derived when the table refreshes
         self._enforce_locked_points("baseline")
         self._update_prompt_status()
+        layer = self._layer("baseline", POINTS_LAYER["baseline"])
+        if isinstance(layer, Points) and layer.mode == "add" and len(layer.data):
+            self._set_focus(len(layer.data) - 1)
 
     def _on_followup_points_changed(self, event=None) -> None:
+        if self._applying_edit:
+            return  # our own edit's assignment below, re-entering; nothing to react to
         if self._apply_click_edit():
             return
         # editing a follow-up point is a correction, not a reason to drop the row
@@ -1460,6 +1533,10 @@ class LongiTrackWidget(QWidget):
         names = self._lesion_layers.get(lesion_id, {})
         return [layer for role, name in names.items() if (layer := self._layer(role, name)) is not None]
 
+    def _row_has_mask(self, row: int, role: str) -> bool:
+        lesion_id = self._get_at(self._lesions, row, None)
+        return lesion_id is not None and role in self._lesion_layers.get(lesion_id, {})
+
     @staticmethod
     def _row_prompt_shown(row: int, point_layers: dict) -> bool:
         return all(
@@ -1478,6 +1555,7 @@ class LongiTrackWidget(QWidget):
     def _refresh_point_table(self) -> None:
         baseline_points, followup_points = self._baseline_points(), self._followup_points()
         self._apply_prompt_colors()
+        self._apply_mask_highlight()
         point_layers = {role: self._layer(role, POINTS_LAYER[role]) for role in ROLES}
         table = self.point_table
         self._syncing_table = True
@@ -1529,6 +1607,7 @@ class LongiTrackWidget(QWidget):
         self.track_button.setEnabled(not self._busy and ready and (needs_registration or bool(unsegmented)))
         can_segment = any(self._get_at(self._accepted, row, False) for row in unsegmented)
         self.segment_button.setEnabled(not self._busy and can_segment)
+        self.open_pair_button.setEnabled(not self._busy and bool(self._pair_list))
 
     def _stop_adding_points(self) -> None:
         self.add_point_button.setChecked(False)
@@ -1594,11 +1673,23 @@ class LongiTrackWidget(QWidget):
     def _on_table_clicked(self, row: int, _column: int = 0) -> None:
         baseline_points, followup_points = self._baseline_points(), self._followup_points()
         if row < len(baseline_points) and row < len(followup_points):
-            self._focus = row
+            self._set_focus(row)
             self._lock_views(baseline_points[row], followup_points[row])
         for role, points in (("baseline", baseline_points), ("followup", followup_points)):
             if row < len(points):
                 self._focus_on(role, points[row])
+        if self._row_has_followup(row):
+            self._jump_to_verification(row)
+
+    def _jump_to_verification(self, row: int) -> None:
+        """Bring up Accept/Edit/Skip for this row, without dropping any others still pending."""
+        if self._row_lesion_layers(row):
+            return
+        if row in self._verify_rows:
+            self._verify_rows.remove(row)
+        self._verify_rows.insert(0, row)
+        self._verify_editing = False
+        self._show_current_verification()
 
     def _on_toggle_prompt_shown(self, row: int, value: bool) -> None:
         for role in ROLES:
@@ -1712,7 +1803,7 @@ class LongiTrackWidget(QWidget):
             if lesion_id is not None:
                 self._remove_lesion_segmentation(lesion_id)
         if self._focus >= row:
-            self._focus = max(0, self._focus - 1)
+            self._set_focus(max(0, self._focus - 1))
         self.export_button.setEnabled(any(lesion_id is not None for lesion_id in self._lesions))
         self._update_prompt_status()
         self._refresh_point_table()
@@ -1892,7 +1983,7 @@ class LongiTrackWidget(QWidget):
     # ---------------------------------------------------------- verification -
     def _begin_verification(self, rows: Sequence[int]) -> None:
         """Walk the freshly proposed points, one lesion at a time (Accept / Edit)."""
-        self._verify_rows = [row for row in rows if self._row_has_followup(row)]
+        self._verify_rows = [row for row in rows if self._row_has_followup(row) and not self._row_lesion_layers(row)]
         self._verify_editing = False
         self._show_current_verification()
 
@@ -1904,6 +1995,8 @@ class LongiTrackWidget(QWidget):
             layer.mode = "pan_zoom"
 
     def _show_current_verification(self) -> None:
+        while self._verify_rows and self._row_lesion_layers(self._verify_rows[0]):
+            self._verify_rows.pop(0)
         if not self._verify_rows:
             self._clear_point_selection()
             self.verify_bar.setVisible(False)
@@ -1921,6 +2014,8 @@ class LongiTrackWidget(QWidget):
         self.verify_edit_button.setEnabled(not self._verify_editing)
         if self._verify_editing:
             self.verify_label.setText(f"Lesion {row + 1}/{total}: click, then Accept")
+        elif self._get_at(self._accepted, row, False):
+            self.verify_label.setText(f"Lesion {row + 1}/{total}: accepted -- edit if needed")
         else:
             self.verify_label.setText(f"Lesion {row + 1}/{total}: propagated correctly?")
         self._focus_row(row)
@@ -1929,7 +2024,7 @@ class LongiTrackWidget(QWidget):
     def _focus_row(self, row: int) -> None:
         baseline_points, followup_points = self._baseline_points(), self._followup_points()
         if row < len(baseline_points) and row < len(followup_points):
-            self._focus = row
+            self._set_focus(row)
             self._lock_views(baseline_points[row], followup_points[row])
             self._focus_on("baseline", baseline_points[row])
             self._focus_on("followup", followup_points[row])
@@ -2105,7 +2200,7 @@ class LongiTrackWidget(QWidget):
         followup_points = self._followup_points()
         if rows and rows[0] < len(followup_points) and rows[0] < len(baseline_points):
             # otherwise the new follow-up prompt lands on a slice nobody is looking at
-            self._focus = rows[0]
+            self._set_focus(rows[0])
             self._lock_views(baseline_points[rows[0]], followup_points[rows[0]])
             self._focus_on("baseline", baseline_points[rows[0]])
         self._update_prompt_status()
@@ -2242,6 +2337,7 @@ class LongiTrackWidget(QWidget):
                     mask_payload["mask"].astype(np.uint16),
                     bounds=tuple(tuple(int(value) for value in pair) for pair in bounds),
                     suffix=lesion_id,
+                    row=row,
                 )
                 if name is not None:
                     new_layer_names[role] = name
@@ -2253,8 +2349,6 @@ class LongiTrackWidget(QWidget):
                         self.vm[role].layers.remove(layer)
             self._lesion_layers[lesion_id] = new_layer_names
             self._set_at(self._lesions, row, lesion_id, None)
-            # the mask stands in for its prompt; the row's toggle brings the point back
-            self._on_toggle_prompt_shown(row, False)
             self._log(f"lesion (row {row + 1}): {self._summarize(result)}")
 
         self.export_button.setEnabled(any(lesion_id is not None for lesion_id in self._lesions))
@@ -2306,15 +2400,15 @@ class LongiTrackWidget(QWidget):
         data: np.ndarray,
         bounds: tuple[tuple[int, int], ...] | None = None,
         suffix: str = "",
+        row: int | None = None,
     ) -> str | None:
         reference = self._ct[role]
         if reference is None:
             return None
         name = SEG_LAYER[role] if not suffix else f"{SEG_LAYER[role]} {suffix}"
-        try:
-            color = self._row_color(int(suffix) - 1) if suffix else LESION_COLORS[0]
-        except ValueError:
-            color = LESION_COLORS[0]
+        if row is None:
+            row = self._lesions.index(suffix) if suffix in self._lesions else None
+        color = self._row_color(row) if row is not None else LESION_COLORS[0]
         colormap = self._mask_colormap(data, color)
         translate = reference.translate
         if bounds is not None:
@@ -2329,11 +2423,22 @@ class LongiTrackWidget(QWidget):
             existing.translate = translate
             existing.colormap = colormap
             existing.visible = True
+            self._raise_points_layer(role)
             return name
         self.vm[role].add_labels(
             data, name=name, scale=reference.scale, translate=translate, opacity=0.55, colormap=colormap
         )
+        self._raise_points_layer(role)
         return name
+
+    def _raise_points_layer(self, role: str) -> None:
+        """Keep prompts drawn above every mask, so a border is never hidden underneath one."""
+        layer = self._layer(role, POINTS_LAYER[role])
+        layers = self.vm[role].layers
+        if isinstance(layer, Points) and layer in layers:
+            index = layers.index(layer)
+            if index != len(layers) - 1:
+                layers.move(index, len(layers))
 
     def _prepare_lesion_layers(self, row: int) -> None:
         """Build this lesion's (empty) label layers now, so segmenting only fills them."""
@@ -2456,7 +2561,7 @@ class LongiTrackWidget(QWidget):
         self._remove_all_segmentation_layers()
         # the backend's result cache is keyed on scan paths, so nothing else to clear
         self._slice_offset = 0.0
-        self._focus = 0
+        self._set_focus(0)
         self.export_button.setEnabled(False)
         self._invalidate_registration()
 

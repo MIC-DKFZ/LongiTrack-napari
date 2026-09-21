@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .pantrack import DEFAULT_PATIENT, ScanPair, download_pair
+from longitrack_backend.pantrack import DEFAULT_PATIENT, ScanPair, download_pair
 
 CT_WINDOW = (-150.0, 250.0)
 

@@ -23,6 +23,8 @@ def test_get_reader_rejects_mixed_lists():
 
 
 def test_read_volume_matches_simpleitkio(sample_pair):
+    # a remote-only install has no longiseg to compare against
+    pytest.importorskip("longiseg")
     from longiseg.imageio.simpleitk_reader_writer import SimpleITKIO
 
     baseline, _ = sample_pair

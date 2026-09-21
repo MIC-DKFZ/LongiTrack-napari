@@ -35,57 +35,51 @@ dependencies = [
     "napari[all]>=0.5.0",
     "qtpy>=2.4",
     "superqt>=0.6",
-    # tracking model + registration, see [tool.uv.sources] below
-    "longiseg[tracking]",
-    # cc3d is imported by longiseg.tracking but missing from its dependency list
-    "connected-components-3d>=3.12",
-    # model distribution
-    "huggingface-hub>=0.24",
+    # GPU inference/registration process, see [tool.uv.sources] below
+    "longitrack-backend",
     # io / numerics
     "SimpleITK>=2.2.1",
     "numpy>=1.24",
-    "torch>=2.1.2",
     "cryptography>=44",
 ]
 
 [project.optional-dependencies]
+# running the backend locally -- torch and LongiSeg
+local = [
+    "longitrack-backend[gpu]",
+]
 dev = [
     "pytest>=8",
     "pytest-qt>=4.4",
     "ruff>=0.6",
 ]
 
+# installed by default in this clone; downstream installs stay remote-only unless they ask
+[dependency-groups]
+local = [
+    "longitrack-backend[gpu]",
+]
+
 [project.urls]
 homepage = "https://github.com/MIC-DKFZ/LongiTrack-napari"
 repository = "https://github.com/MIC-DKFZ/LongiTrack-napari"
-"LongiSeg" = "https://github.com/MIC-DKFZ/LongiSeg"
+"LongiTrack-backend" = "https://github.com/MIC-DKFZ/LongiTrack-backend"
 
 [project.scripts]
-longitrack-model = "longitrack_napari._cli:main"
 longitrack-napari = "longitrack_napari.app:main"
-longitrack-backend = "longitrack_napari.backend.server:main"
-create_remote_id = "longitrack_napari.remote_identity:create_main"
-push_remote_id = "longitrack_napari.remote_identity:push_main"
-create_and_push_remote_id = "longitrack_napari.remote_identity:create_and_push_main"
 
 [project.entry-points."napari.manifest"]
 longitrack-napari = "longitrack_napari:napari.yaml"
 
 # --- uv -----------------------------------------------------------------------
-# LongiSeg is not on PyPI, so it is pulled straight from the GitHub remote. To work
-# against a local clone instead, either edit this to
-#     longiseg = { path = "../longi-seg-pub", editable = true }
-# or, without touching this file, run
-#     uv sync && uv pip install -e ../longi-seg-pub
+# Not on PyPI, so it comes from its GitHub remote; it brings its own sources with it.
+# To work against a local clone instead, run
+#     uv sync && uv pip install -e ../LongiTrack-backend
 [tool.uv.sources]
-longiseg = { git = "https://github.com/MIC-DKFZ/LongiSeg.git", branch = "master" }
+longitrack-backend = { git = "https://github.com/MIC-DKFZ/LongiTrack-backend.git", tag = "v0.1.0" }
 
-# torch resolves to the CUDA-enabled manylinux wheel from PyPI by default. For a
-# CPU-only install (much smaller), uncomment the following and add the index:
-# [[tool.uv.index]]
-# name = "pytorch-cpu"
-# url = "https://download.pytorch.org/whl/cpu"
-# explicit = true
+[tool.uv]
+default-groups = ["local"]
 
 [build-system]
 requires = ["hatchling"]

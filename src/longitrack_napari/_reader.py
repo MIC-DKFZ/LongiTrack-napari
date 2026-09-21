@@ -22,15 +22,28 @@ def _strip_suffix(name: str) -> str:
 
 
 def read_volume(path: str | Path) -> tuple[np.ndarray, dict]:
-    # read through SimpleITKIO rather than SimpleITK directly, so the array a point is
-    # clicked on is byte for byte the array the network is preprocessed from
-    from longiseg.imageio.simpleitk_reader_writer import SimpleITKIO
+    # the same reshape-and-cast LongiSeg's own SimpleITKIO.read_images does for one file,
+    # reimplemented on plain SimpleITK so the frontend never needs longiseg/torch installed;
+    # the array a point is clicked on stays byte for byte what the network preprocesses
+    import SimpleITK as sitk
 
     path = Path(path)
-    data, properties = SimpleITKIO().read_images([str(path)])
-    array = data[0]
+    itk_image = sitk.ReadImage(str(path))
+    array = sitk.GetArrayFromImage(itk_image)
+    if array.ndim == 2:
+        array = array[None, None]
+    elif array.ndim == 3:
+        array = array[None]
+    elif array.ndim != 4:
+        raise RuntimeError(f"Unexpected number of dimensions: {array.ndim} in file {path}")
+    array = array.astype(np.float32, copy=False)[0]
 
-    spacing_zyx = tuple(float(abs(s)) for s in reversed(properties["sitk_stuff"]["spacing"]))
+    sitk_stuff = {
+        "spacing": itk_image.GetSpacing(),
+        "origin": itk_image.GetOrigin(),
+        "direction": itk_image.GetDirection(),
+    }
+    spacing_zyx = tuple(float(abs(s)) for s in reversed(sitk_stuff["spacing"]))
     while len(spacing_zyx) < array.ndim:
         spacing_zyx = (1.0, *spacing_zyx)
 
@@ -43,7 +56,7 @@ def read_volume(path: str | Path) -> tuple[np.ndarray, dict]:
             # pick their reader from the extension
             "longitrack_path": os.path.abspath(path),
             "spacing_zyx": spacing_zyx,
-            "sitk_stuff": properties["sitk_stuff"],
+            "sitk_stuff": sitk_stuff,
         },
     }
     return array, kwargs

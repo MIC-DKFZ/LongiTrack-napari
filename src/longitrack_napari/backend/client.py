@@ -16,8 +16,7 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-
-from . import protocol
+from longitrack_backend import protocol
 
 Progress = Callable[[str], None]
 
@@ -66,7 +65,7 @@ class BackendClient:
             if progress:
                 progress("Starting the model backend process...")
             self._process = subprocess.Popen(
-                [sys.executable, "-m", "longitrack_napari.backend.server", "--socket", self._socket_path],
+                [sys.executable, "-m", "longitrack_backend.server", "--socket", self._socket_path],
                 # A PIPE would need to be drained for the backend's entire lifetime or
                 # verbose dependencies could eventually deadlock on a full pipe.
                 stdout=subprocess.DEVNULL,
@@ -412,7 +411,7 @@ class BackendClient:
 
     def upload_model_folder(self, folder: str | Path, progress: Progress | None = None) -> str:
         """Transfer a local LongiSeg checkpoint and materialize it on the backend."""
-        from ..model import CHECKPOINT_NAME, REQUIRED_FILES, validate_model_folder
+        from longitrack_backend.model import CHECKPOINT_NAME, REQUIRED_FILES, validate_model_folder
 
         source = validate_model_folder(folder, folds=None)
         files = [source / name for name in REQUIRED_FILES]
@@ -452,7 +451,7 @@ class BackendClient:
         progress: Progress | None = None,
     ) -> list:
         # a plain dataclass, so importing it pulls in nothing heavy
-        from ..registration import PointPropagation
+        from longitrack_backend.registration import PointPropagation
 
         # Retain the old keyword for external callers while the UI uses the explicit
         # five-position refinement scale.
