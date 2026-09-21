@@ -1,7 +1,8 @@
 # LongiTrack-napari
 
-An interactive napari viewer for **point-prompted longitudinal lesion tracking** with
-[LongiSeg](https://github.com/MIC-DKFZ/LongiSeg).
+An interactive [napari](https://napari.org) viewer for **point-prompted longitudinal lesion
+tracking** with [LongiSeg](https://github.com/MIC-DKFZ/LongiSeg), backed by
+[LongiTrack-backend](https://github.com/MIC-DKFZ/LongiTrack-backend).
 
 [![arXiv](https://img.shields.io/badge/arXiv-2605.23118-b31b1b.svg)](https://arxiv.org/abs/2605.23118)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
@@ -13,37 +14,64 @@ scan -- and, from the same prompt, in the baseline scan too.
 
 See [documentation/workflow.md](documentation/workflow.md) for what happens on a click.
 
-## Quick start
+## Choose where the backend runs
+
+The plugin has two modes:
+
+- **Local backend — Linux only.** Runs the GPU model process on the same machine as napari. Use the full install.
+- **Remote backend — macOS and Linux.** Keeps napari lightweight and runs model work on a separate Linux GPU server.
+  Use the remote-only install; scans are uploaded to the server for processing.
+
+A full install can do either and switches between them in the plugin; see
+[Using a remote GPU backend](#using-a-remote-gpu-backend).
+
+## Installation
+
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) once:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+Clone the plugin once:
 
 ```bash
 git clone https://github.com/MIC-DKFZ/LongiTrack-napari.git
 cd LongiTrack-napari
+```
+
+### Local installation (Linux only)
+
+```bash
 uv sync
 uv run longitrack-napari
 ```
 
-Then **Plugins -> LongiSeg Tracking**. On first open it asks whether the model should run on a
-local or a remote backend; picking local starts it straight away and warms the registration
-network in the background.
-
-First run downloads the tracking weights into `~/.cache/huggingface` and the
-uniGradICON weights into `~/.cache/longitrack`. Both are cached.
-
-No data at hand? **Example** fetches one pair with five annotated lesions
-from the [PanTrack](https://huggingface.co/datasets/mrokuss/PanTrack) dataset. To fetch a
-different pair up front:
+### Remote-only installation (macOS and Linux)
 
 ```bash
-uv run longitrack-model sample --list
-uv run longitrack-model sample -p PanTrack_009 -i 0
+uv sync --no-default-groups
+uv run longitrack-napari
 ```
+
+### Opening the plugin
+
+`longitrack-napari` starts napari with the panel already docked, optionally on a pair of scans:
+
+```bash
+uv run longitrack-napari --baseline patient_001/bl.nii.gz --followup patient_001/fu.nii.gz
+```
+
+In a napari you started yourself, the panel is **Plugins -> LongiSeg Tracking**, and the pair
+is also available as a sample under **File -> Open Sample**.
+
 
 ## The workflow
 
 | Step | What you do | What happens |
 | --- | --- | --- |
 | 1 | *Initialize model* | Loads the weights and warms them. Once per session; clicking it while the backend is still starting just queues it. |
-| 2 | Open a baseline and a follow-up scan, or press *Example* | Both scans are prepared for registration and segmentation in the background. |
+| 2 | Open a baseline and a follow-up scan, or press *Load PanTrack example* | Both scans are prepared for registration and segmentation in the background. |
 | 3 | *Set baseline points*, then click each lesion | Each point is one tracked lesion and gets a row in the list. Click the button again to stop adding. |
 | 4 | *Propagate* | uniGradICON registers the pair and maps every not-yet-registered point across. |
 | 5 | Verify each proposal: **Accept**, **Edit** (click the right spot, then *Accept*) or **Skip** | The viewer steps through the lesions one at a time and locks each point you accept. |
@@ -58,8 +86,16 @@ result is dropped.
 
 ### Annotating several scan pairs
 
-*Next pair...* replaces both scans at once. *Pair list...* takes a JSON file and
-steps through it, one pair per click, with no dialogs:
+Two buttons in the *Scans* box move you through a batch:
+
+- ***Load next pair*** replaces both scans at once and resets the session, the same as
+  replacing either scan on its own. On its own it asks for the two scans in two file
+  dialogs, and leaves everything untouched if you cancel either one.
+- ***Upload pair list*** picks a JSON file listing the pairs up front. *Load next pair* then
+  stops asking and just opens the next entry, so a whole batch needs no file dialogs at all.
+  The button is disabled until a list is loaded, and goes quiet again at the end of the list.
+
+The list is a JSON array, one object per pair:
 
 ```json
 [
@@ -68,7 +104,13 @@ steps through it, one pair per click, with no dialogs:
 ]
 ```
 
-Relative paths resolve against the list file's folder.
+Relative paths resolve against the list file's own folder, so a list can sit next to the data
+it points at and the whole folder stays movable.
+
+The usual batch loop is: *Upload pair list* once, then for each pair *Set baseline points* ->
+*Propagate* -> verify -> *Segment* -> *Export segmentations...* into the same folder ->
+*Load next pair*. Exporting every pair into one folder is what the export format is built for
+(see [Exporting](#exporting)).
 
 ### Several lesions
 
@@ -81,7 +123,10 @@ Moving a baseline point only makes that row need registering again.
 
 One row per lesion: its number in the colour it is drawn in, where it stands (*baseline prompt set*,
 *proposed*, *verified*, or its volume in ml once segmented), an eye to show or hide it, and a bin.
-Hover a row for the actual coordinates; clicking one lines both canvases up on that lesion.
+Hover a row for the actual coordinates; clicking one lines both canvases up on that lesion and
+reopens Accept/Edit/Skip for it, even if it was already accepted -- handy for correcting a point
+without waiting for its turn in a fresh walk. A segmented lesion can still be reopened, but Edit
+is greyed out; undo its verification first if the point itself needs to change.
 
 Right-click a row for the rest: accept it, change its colour, propagate that one point again, undo
 its verification, or remove it.
@@ -93,9 +138,19 @@ baseline included.
 
 ### Options
 
-**Speed/Quality slider** -- *Fastest* (no refinement, no TTA) through *Best* (50 refinement steps,
-TTA). Refinement steps are uniGradICON instance optimisation; TTA is mirroring in the
-segmentation. Fastest is interactive; Best spends considerably longer on the registration.
+**Speed/Quality slider** -- five stops, starting on *Balanced*:
+
+| Stop | Registration refinement | Segmentation TTA |
+| --- | --- | --- |
+| Fastest | none | off |
+| Fast | none | on |
+| Balanced *(default)* | 10 steps | on |
+| Detailed | 25 steps | on |
+| Best | 50 steps | on |
+
+Refinement steps are uniGradICON instance optimisation; TTA is mirroring in the segmentation.
+*Fastest* is interactive; *Best* spends considerably longer on the registration. Moving the
+slider drops cached results, so the next *Propagate* or *Segment* redoes the work.
 
 The device is picked automatically, every fold in the model folder is used, and the baseline
 lesion is always segmented alongside the follow-up one -- the network works on a pair, so the
@@ -111,6 +166,9 @@ The two scans share no physical frame, so slice *n* on the left and slice *n* on
 unrelated anatomy. When a pair is propagated (or you click its row) the world-mm offset between
 the two points is recorded and the follow-up slider follows the baseline one through it. The
 offset is display only -- coordinates handed to the network are untouched.
+
+Scans must come from files on disk: an array pasted into a layer has no spacing, origin or path
+to register against. A scan opened through **File -> Open** is moved into whichever panel is free.
 
 ### Exporting
 
@@ -134,63 +192,76 @@ overwrite an existing mask file and names every collision instead.
 ## Where the model comes from
 
 A LongiSeg model folder (`dataset.json`, `plans.json`, `fold_*/checkpoint_final.pth`), either on
-the Hugging Face Hub or on disk. The *Location* field decides, and is filled at start-up from
-`$LONGITRACK_MODEL_DIR` if set, otherwise `$LONGITRACK_HF_REPO` or the default
-`MIC-DKFZ/LongiSeg-Tracking`. A path that exists is read as a folder; anything else must be a
-repo id and is downloaded.
+the Hugging Face Hub or on disk. The *Source* dropdown and the *Location* field next to it decide
+which: a path that exists is read as a folder, anything else must be a repo id and is downloaded
+on first use. *Initialize model* is what acts on them.
 
-```bash
-uv run longitrack-model info                       # what is in the resolved model?
-uv run longitrack-model download --folds 0         # pull one fold
-uv run longitrack-model upload /path/to/folder -r owner/name
-```
+If several checkpoints are available (published as their own `LongiTrack_v<version>` folder), the
+newest is used by default; append `@1.0` to the *Location* to pin an older one instead.
 
-`upload` pushes only `dataset.json`, `plans.json` and each fold's final checkpoint.
+Fields the plugin fills for you at start-up, so a lab can preset them once:
 
-## Remote GPU backend
+| Environment variable | What it pre-fills |
+| --- | --- |
+| `$LONGITRACK_MODEL_DIR` | *Location*, switched to *Local folder* |
+| `$LONGITRACK_HF_REPO` | *Location*, as a Hub repo id. Default `ykirchhoff/LongiTrack` |
+| `$LONGITRACK_REMOTE_BACKEND` | the remote server address, and opens in *Remote* mode |
 
-Answer **Remote** when the plugin asks where the model should run, and it prompts for the
-endpoint and your Ed25519 private key right away. The viewer stays local; model loading,
-preprocessing, registration, segmentation and export run on the server, and your scans are
-uploaded to it. A local backend reads your files in place and copies nothing.
+Managing model folders outside the plugin -- inspecting, downloading, publishing -- is the
+backend's job; see the [LongiTrack-backend README](https://github.com/MIC-DKFZ/LongiTrack-backend).
 
-## From code
+## Using a remote GPU backend
 
-```python
-from longitrack_napari.app import launch
+The model work can run on a separate Linux GPU server instead of your own machine. The viewer
+uploads the scans; model loading, registration, segmentation and export all happen there.
 
-viewer, widget = launch("baseline.nii.gz", "followup.nii.gz", block=True)
-```
+Someone has to be running a `LongiTrack-backend` server for you first, and has to have added your
+SSH account to its `longitrack` group -- both are covered in the
+[LongiTrack-backend README](https://github.com/MIC-DKFZ/LongiTrack-backend). Once they have, ask
+them for the server's address. Then, on your own machine:
 
-`widget.open_scan("baseline", path)` swaps a scan later. Without the GUI,
-`longitrack_napari.inference.TrackingEngine` runs the same pipeline and takes the arguments the
-widget does not expose (`device`, `disable_tta`, `folds`).
+1. Create an identity and register it with the server, once per server:
 
-## Coordinate conventions
+   ```bash
+   uv run create_and_push_remote_id --name gpu-cluster --ssh you@gpu-server --owner yourname
+   ```
 
-`longitrack_napari.geometry` is the only place that converts between them:
+   The private key stays with you, under `~/.config/longitrack/remote/`; only the public
+   half goes to the server. `--name` is what you will pick in the plugin, `--owner` is you, and it
+   is what the server records next to the key.
 
-- **index** -- `(z, y, x)` as `SimpleITKIO` reads it. What napari shows, and this package's interface.
-- **xyz** -- ITK voxel order, used by LongiSeg's tracking json and `PairRegistration.propagate`.
-- **preprocessed** -- after transpose, crop and resample to the plan's spacing. What the network sees.
+2. In the *Model* box, set **Backend** to *Remote TCP server*. A dialog asks for the server
+   address and which identity to use; *Connect* authenticates and switches over. The address
+   field takes a plain host name, or the whole `CONNECT host:8765` line the server prints.
 
-Scans must come from files on disk: an array pasted into a layer has no spacing, origin or path
-to register against. A scan opened through **File -> Open** is moved into whichever panel is free.
+3. *Test connection* next to the address checks that a server is reachable there without
+   connecting to it -- useful when a connection attempt failed and you want to know which half
+   is at fault.
+
+The **Backend** dropdown switches modes at any time, not just at start-up. Switching closes the
+current backend and prepares the scans and model again on the new one, so anything already
+segmented is dropped -- it does not travel between backends.
+
+On a full install the plugin asks once, at start-up, whether to run local or remote. A remote-only
+install skips the question and opens the connect dialog directly, and its *Local process* entry
+will tell you it has no GPU backend to start.
+
+Remote TCP is authenticated by public key but **not encrypted**. Use a trusted network, or an SSH
+tunnel to a loopback-only server.
+
 
 ## Development
 
 ```bash
-uv sync --extra dev
+uv sync --extra dev            # add --no-default-groups off Linux: the GPU group is Linux only
 uv run pytest
 uv run ruff check .
 ```
 
-## Citing
+The tests that need real weights skip themselves unless `$LONGITRACK_MODEL_DIR` points at a
+LongiSeg tracking model folder; everything else runs without a GPU.
 
-This viewer is the front end for **Exploiting Longitudinal Context in Clinician-Verified
-Interactive Lesion Tracking** ([arXiv:2605.23118](https://arxiv.org/abs/2605.23118)). Please cite it
-together with [LongiSeg](https://doi.org/10.1007/978-3-031-72069-7_7) for the segmentation
-framework and [uniGradICON](https://arxiv.org/abs/2403.05780) for the registration.
+## Citing
 
 ```bibtex
 @article{kirchhoff2026longitrack,
@@ -222,6 +293,13 @@ framework and [uniGradICON](https://arxiv.org/abs/2403.05780) for the registrati
   pages     = {749--760},
   year      = {2024},
   publisher = {Springer}
+}
+
+@misc{napari2019,
+  title  = {napari: a multi-dimensional image viewer for Python},
+  author = {{napari contributors}},
+  year   = {2019},
+  doi    = {10.5281/zenodo.3555620}
 }
 ```
 

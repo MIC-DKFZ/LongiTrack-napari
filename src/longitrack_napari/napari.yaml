@@ -32,4 +32,4 @@ contributions:
   sample_data:
     - command: longitrack-napari.make_pantrack_pair
       key: pantrack-pair
-      display_name: PanTrack baseline/follow-up pair (downloads ~0.6 GB)
+      display_name: PanTrack baseline/follow-up pair
