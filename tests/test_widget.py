@@ -220,6 +220,7 @@ def test_clear_everything_closes_both_scans_and_clears_the_gpu_scan_cache(widget
     calls = []
 
     class FakeBackend:
+        is_remote = False
         def is_running(self):
             return True
 
@@ -330,6 +331,7 @@ def test_a_correction_survives_a_later_unrelated_propagation(widget):
 
 # --------------------------------------------------------------- accept controls -
 class _FakePropagateBackend:
+    is_remote = False
     def __init__(self, propagations):
         self.propagations = propagations
         self.calls: list[list] = []
@@ -378,6 +380,7 @@ def test_track_all_propagates_accepts_and_segments_everything(bare, tmp_path, qt
     track_calls = []
 
     class FakeBackend:
+        is_remote = False
         def ensure_started(self, progress=None):
             return False
 
@@ -454,6 +457,7 @@ def test_segment_all_only_touches_accepted_rows(bare, tmp_path, qtbot):
     calls = []
 
     class FakeBackend:
+        is_remote = False
         def ensure_started(self, progress=None):
             return False
 
@@ -499,6 +503,7 @@ def test_segmenting_sends_the_hand_corrected_point_but_the_original_proposal(bar
     calls = []
 
     class FakeBackend:
+        is_remote = False
         def ensure_started(self, progress=None):
             pass
 
@@ -710,6 +715,7 @@ def test_cancelling_track_all_does_not_contaminate_a_later_propagate(widget):
 
 # --------------------------------------------- cancel restarts a wedged backend -
 class _FakeBackendWithActiveRequest:
+    is_remote = False
     # a started GPU call is not interruptible in place -- see BackendClient.kill()
     def __init__(self):
         self.killed = threading.Event()
@@ -726,6 +732,7 @@ class _FakeBackendWithActiveRequest:
 
 
 class _FakeBackendIdle:
+    is_remote = False
     # nothing is actually in flight against it right now
     def __init__(self):
         self.killed = False
@@ -810,7 +817,6 @@ def test_clicking_a_different_row_keeps_the_pending_ones_queued(widget):
 
     widget._on_verify_skip()
     assert widget._verify_rows == [0, 1], "the original walk resumes once the detour is dismissed"
-
 
 
 # ------------------------------------------------- switching the backend mode -

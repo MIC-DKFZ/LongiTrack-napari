@@ -82,7 +82,7 @@ LESION_COLORS = np.asarray(
     dtype=float,
 )
 
-# Slider positions: only registration refinement varies, TTA is always on.
+# Slider positions: (label, uniGradICON refinement steps, disable TTA, summary).
 QUALITY_MODES = (
     ("Fastest", None, True, "no refinement, no TTA"),
     ("Fast", None, False, "no refinement, TTA"),
@@ -1128,17 +1128,13 @@ class LongiTrackWidget(QWidget):
                 for disk_path in disk_paths:
                     # a local backend reads the same file; only a remote one needs the bytes sent
                     uploaded[disk_path] = (
-                        backend.upload_scan(disk_path, progress=emit)
-                        if getattr(backend, "is_remote", False)
-                        else disk_path
+                        backend.upload_scan(disk_path, progress=emit) if backend.is_remote else disk_path
                     )
                 # Registration has no dependency on LongiSeg.
-                preload_registration = getattr(backend, "preload_registration_scans", None)
-                if preload_registration is not None:
-                    try:
-                        preload_registration(list(uploaded.values()), progress=emit)
-                    except Exception as error:  # noqa: BLE001 - preload is opportunistic
-                        emit(f"Could not prepare registration inputs yet ({error}).")
+                try:
+                    backend.preload_registration_scans(list(uploaded.values()), progress=emit)
+                except Exception as error:  # noqa: BLE001 - preload is opportunistic
+                    emit(f"Could not prepare registration inputs yet ({error}).")
                 if self._scan_upload_generation == generation and self._backend is backend:
                     self._backend_scan_paths.update(uploaded)
                 return uploaded
@@ -1169,9 +1165,7 @@ class LongiTrackWidget(QWidget):
         def work() -> None:
             try:
                 backend_paths = [self._backend_scan_path(path) for path in disk_paths]
-                preload = getattr(backend, "load_scans", None)
-                if preload is not None:
-                    preload(backend_paths, progress=emit)
+                backend.load_scans(backend_paths, progress=emit)
             except Exception as error:
                 for path in disk_paths:
                     self._segmentation_preload_paths.discard(path)
@@ -1182,7 +1176,7 @@ class LongiTrackWidget(QWidget):
     def _backend_scan_path(self, path: str | Path) -> str:
         """The path the backend should read this scan from."""
         disk_path = str(Path(path).expanduser().absolute())
-        if not getattr(self._backend, "is_remote", False):
+        if not self._backend.is_remote:
             return disk_path  # same filesystem, nothing was ever copied
         future = self._scan_upload_futures.get(disk_path)
         if future is not None:
@@ -1890,7 +1884,7 @@ class LongiTrackWidget(QWidget):
             # a local backend opens the folder itself; only a remote one needs a copy
             backend_location = (
                 self._backend.upload_model_folder(location, emit)
-                if local_model and getattr(self._backend, "is_remote", False)
+                if local_model and self._backend.is_remote
                 else location
             )
             # device=None: the backend decides and reports back what it picked
@@ -2281,7 +2275,7 @@ class LongiTrackWidget(QWidget):
                 # a local backend opens the folder itself; only a remote one needs a copy
                 backend_location = (
                     self._backend.upload_model_folder(location, emit)
-                    if local_model and getattr(self._backend, "is_remote", False)
+                    if local_model and self._backend.is_remote
                     else location
                 )
                 self._backend.initialize(backend_location, device=None, progress=emit)
@@ -2664,9 +2658,7 @@ class LongiTrackWidget(QWidget):
         Closing the socket frees the panel at once; the call already on the GPU runs itself
         out and its result is dropped.
         """
-        cancel = getattr(self._backend, "cancel_active", None)
-        if cancel is not None:
-            cancel()
+        self._backend.cancel_active()
         return "Cancelled. The step already on the GPU finishes by itself; its result is dropped."
 
     def _on_job_done(self, payload) -> None:

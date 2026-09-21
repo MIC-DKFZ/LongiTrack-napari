@@ -447,16 +447,11 @@ class BackendClient:
         points: list[list[float]],
         followup_shape: tuple[int, ...],
         refinement_steps: int | None = None,
-        fast: bool | None = None,
         progress: Progress | None = None,
     ) -> list:
         # a plain dataclass, so importing it pulls in nothing heavy
         from longitrack_backend.registration import PointPropagation
 
-        # Retain the old keyword for external callers while the UI uses the explicit
-        # five-position refinement scale.
-        if fast is not None:
-            refinement_steps = None if fast else 50
         result = self._request(
             "propagate",
             {
