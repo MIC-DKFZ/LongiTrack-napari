@@ -280,6 +280,13 @@ uv run ruff check .
 The tests that need real weights skip themselves unless `$LONGITRACK_MODEL_DIR` points at a
 LongiSeg tracking model folder; everything else runs without a GPU.
 
+Hooks run `ruff --fix` and a few cheap file checks on every commit, and the tests on every push:
+
+```bash
+uv tool install pre-commit
+pre-commit install -t pre-commit -t pre-push
+```
+
 ## Citing
 
 ```bibtex
