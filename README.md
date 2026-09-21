@@ -43,16 +43,18 @@ cd LongiTrack-napari
 ### Local installation (Linux only)
 
 ```bash
-uv sync
+uv sync --extra local
 uv run longitrack-napari
 ```
 
 ### Remote-only installation (macOS and Linux)
 
 ```bash
-uv sync --no-default-groups
+uv sync
 uv run longitrack-napari
 ```
+
+Keep the `--extra local` when updating a local clone; a bare `uv sync` drops the GPU stack again.
 
 ### Opening the plugin
 
@@ -253,7 +255,7 @@ tunnel to a loopback-only server.
 ## Development
 
 ```bash
-uv sync --extra dev            # add --no-default-groups off Linux: the GPU group is Linux only
+uv sync --extra dev
 uv run pytest
 uv run ruff check .
 ```

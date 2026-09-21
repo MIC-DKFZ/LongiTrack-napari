@@ -2178,15 +2178,11 @@ dependencies = [
 
 [package.optional-dependencies]
 dev = [
+    { name = "longitrack-backend", extra = ["gpu"] },
     { name = "pytest" },
     { name = "pytest-qt" },
     { name = "ruff" },
 ]
-local = [
-    { name = "longitrack-backend", extra = ["gpu"] },
-]
-
-[package.dev-dependencies]
 local = [
     { name = "longitrack-backend", extra = ["gpu"] },
 ]
@@ -2196,6 +2192,7 @@ requires-dist = [
     { name = "cryptography", specifier = ">=44" },
     { name = "longitrack-backend", git = "https://github.com/MIC-DKFZ/LongiTrack-backend.git?tag=v0.1.0" },
     { name = "longitrack-backend", extras = ["gpu"], marker = "extra == 'local'", git = "https://github.com/MIC-DKFZ/LongiTrack-backend.git?tag=v0.1.0" },
+    { name = "longitrack-napari", extras = ["local"], marker = "extra == 'dev'" },
     { name = "napari", extras = ["all"], specifier = ">=0.5.0" },
     { name = "numpy", specifier = ">=1.24" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
@@ -2206,9 +2203,6 @@ requires-dist = [
     { name = "superqt", specifier = ">=0.6" },
 ]
 provides-extras = ["local", "dev"]
-
-[package.metadata.requires-dev]
-local = [{ name = "longitrack-backend", extras = ["gpu"], git = "https://github.com/MIC-DKFZ/LongiTrack-backend.git?tag=v0.1.0" }]
 
 [[package]]
 name = "magicgui"

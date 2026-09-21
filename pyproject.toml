@@ -44,20 +44,16 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# running the backend locally -- torch and LongiSeg
+# running the backend locally -- torch and LongiSeg. Opt-in, so a remote-only clone stays
+# remote-only: `uv run` installs no extras, and never removes ones that are there.
 local = [
     "longitrack-backend[gpu]",
 ]
 dev = [
+    "longitrack-napari[local]",
     "pytest>=8",
     "pytest-qt>=4.4",
     "ruff>=0.6",
-]
-
-# installed by default in this clone; downstream installs stay remote-only unless they ask
-[dependency-groups]
-local = [
-    "longitrack-backend[gpu]",
 ]
 
 [project.urls]
@@ -77,9 +73,6 @@ longitrack-napari = "longitrack_napari:napari.yaml"
 #     uv sync && uv pip install -e ../LongiTrack-backend
 [tool.uv.sources]
 longitrack-backend = { git = "https://github.com/MIC-DKFZ/LongiTrack-backend.git", tag = "v0.1.0" }
-
-[tool.uv]
-default-groups = ["local"]
 
 [build-system]
 requires = ["hatchling"]
