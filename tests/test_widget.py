@@ -950,3 +950,99 @@ def test_a_scan_opened_while_busy_still_takes_the_window(widget):
     from longitrack_napari._windowing import PRESETS
 
     assert tuple(stranded.contrast_limits) == PRESETS["Bone"].limits
+
+
+class _FakeUploadingBackend:
+    is_remote = True
+
+    def __init__(self, fail: bool = False):
+        self.release = threading.Event()
+        self.fail = fail
+        self.uploads: list[str] = []
+
+    def ensure_started(self, progress=None):
+        return False
+
+    def is_running(self):
+        return True
+
+    def upload_scan(self, path, progress=None):
+        self.uploads.append(path)
+        self.release.wait(5)
+        if self.fail:
+            raise RuntimeError("connection reset")
+        return f"/remote/{os.path.basename(path)}"
+
+    def preload_registration_scans(self, paths, progress=None):
+        pass
+
+
+def _open_remote_pair(bare, backend, tmp_path):
+    bare._set_backend_mode(True)
+    bare._backend = backend
+    for role, name in (("baseline", "bl_0000.nii.gz"), ("followup", "fu_0000.nii.gz")):
+        bare.open_scan(role, _write_scan(tmp_path / name))
+    prompt_layers(bare, [[3, 4, 4]], [])
+
+
+def test_propagate_and_track_wait_until_the_backend_has_both_scans(bare, tmp_path, qtbot):
+    backend = _FakeUploadingBackend()
+    _open_remote_pair(bare, backend, tmp_path)
+
+    assert not bare.propagate_button.isEnabled()
+    assert not bare.track_button.isEnabled()
+    assert "uploaded and prepared" in bare.propagate_button.toolTip()
+
+    backend.release.set()
+    qtbot.waitUntil(bare.propagate_button.isEnabled, timeout=5000)
+    assert bare.track_button.isEnabled()
+    assert bare.propagate_button.toolTip() == bare.propagate_button.property("idle_tooltip")
+
+
+def test_a_failed_upload_keeps_the_buttons_disabled_until_it_is_retried(bare, tmp_path, qtbot):
+    backend = _FakeUploadingBackend(fail=True)
+    _open_remote_pair(bare, backend, tmp_path)
+    backend.release.set()
+    qtbot.waitUntil(lambda: "connection reset" in bare.propagate_button.toolTip(), timeout=5000)
+    assert not bare.propagate_button.isEnabled()
+
+    backend.fail = False
+    uploads_before = len(backend.uploads)
+    bare._queue_scan_preloads(bare._open_scan_paths())
+    qtbot.waitUntil(bare.propagate_button.isEnabled, timeout=5000)
+    assert len(backend.uploads) > uploads_before
+
+
+def test_an_unconnected_remote_backend_neither_prepares_scans_nor_enables_propagate(bare, tmp_path):
+    class Unconnected(_FakeUploadingBackend):
+        is_remote = False
+
+        def ensure_started(self, progress=None):
+            pytest.fail("must not start a local backend while remote mode is selected")
+
+    _open_remote_pair(bare, Unconnected(), tmp_path)
+
+    assert not bare._scan_upload_futures
+    assert not bare.propagate_button.isEnabled()
+    assert bare.propagate_button.toolTip() == "Connect to the remote backend first."
+
+
+def test_the_segmentation_preload_never_waits_on_an_upload_queued_behind_it(bare, tmp_path, qtbot):
+    loaded: list[list[str]] = []
+
+    class Backend(_FakeUploadingBackend):
+        def load_scans(self, paths, progress=None):
+            loaded.append(list(paths))
+
+    backend = Backend()
+    _open_remote_pair(bare, backend, tmp_path)
+    bare._backend_initialized = True
+    paths = bare._open_scan_paths()
+    bare._queue_segmentation_preloads(paths)
+    baseline = str(paths[0].absolute())
+    bare._preload_paths.discard(baseline)
+    bare._queue_scan_preloads([baseline])
+
+    backend.release.set()
+    qtbot.waitUntil(lambda: bool(loaded) and len(backend.uploads) == 3, timeout=5000)
+    assert loaded == [["/remote/bl_0000.nii.gz", "/remote/fu_0000.nii.gz"]]

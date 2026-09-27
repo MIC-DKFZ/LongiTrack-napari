@@ -7,6 +7,7 @@ import queue
 import threading
 import traceback
 from collections.abc import Sequence
+from concurrent.futures import Future
 from pathlib import Path
 
 import numpy as np
@@ -116,6 +117,7 @@ class _Bridge(QObject):
     failed = Signal(object)
     model_done = Signal(object)
     model_failed = Signal(object)
+    scans_changed = Signal()
 
 
 class _DaemonWorker:
@@ -127,11 +129,20 @@ class _DaemonWorker:
 
     def _loop(self) -> None:
         while True:
-            fn, args = self._queue.get()
-            fn(*args)
+            future, fn, args = self._queue.get()
+            if not future.set_running_or_notify_cancel():
+                continue
+            try:
+                result = fn(*args)
+            except BaseException as error:  # noqa: BLE001
+                future.set_exception(error)
+            else:
+                future.set_result(result)
 
-    def submit(self, fn, *args) -> None:
-        self._queue.put((fn, args))
+    def submit(self, fn, *args) -> Future:
+        future: Future = Future()
+        self._queue.put((future, fn, args))
+        return future
 
     def shutdown(self, wait: bool = False) -> None:
         pass  # nothing to release: the thread is a daemon and dies with the process
@@ -140,6 +151,10 @@ class _DaemonWorker:
 def _resolve_pair_path(base_dir: Path, raw: str) -> str:
     candidate = Path(raw).expanduser()
     return str(candidate if candidate.is_absolute() else base_dir / candidate)
+
+
+def _disk_path(path: str | Path) -> str:
+    return str(Path(path).expanduser().absolute())
 
 
 def layer_path(layer) -> Path | None:
@@ -171,8 +186,10 @@ class LongiTrackWidget(QWidget):
         self._preload_paths: set[str] = set()
         # Client file paths map to content-addressed scan copies owned by the backend.
         self._backend_scan_paths: dict[str, str] = {}
-        self._scan_upload_futures: dict[str, object] = {}
+        self._scan_upload_futures: dict[str, Future] = {}
+        self._scan_upload_errors: dict[str, str] = {}
         self._scan_upload_generation = 0
+        self._scan_state_lock = threading.Lock()
         self._segmentation_preload_paths: set[str] = set()
         self._model_folder: Path | None = None
         self._export_folder: str | None = None
@@ -251,6 +268,7 @@ class LongiTrackWidget(QWidget):
         self._bridge.failed.connect(self._on_job_failed)
         self._bridge.model_done.connect(self._on_model_job_done)
         self._bridge.model_failed.connect(self._on_model_job_failed)
+        self._bridge.scans_changed.connect(self._on_scan_preparation_changed)
 
         self._build_ui()
         self._install_canvases()
@@ -667,6 +685,7 @@ class LongiTrackWidget(QWidget):
         self.track_button.setToolTip("Propagate, accept every proposal and segment, without verifying each point.")
         self.track_button.clicked.connect(self._on_track_all)
         for button in (self.propagate_button, self.segment_button, self.track_button):
+            button.setProperty("idle_tooltip", button.toolTip())
             bulk_row.addWidget(button)
         layout.addLayout(bulk_row)
 
@@ -909,18 +928,27 @@ class LongiTrackWidget(QWidget):
         from .backend.client import BackendClient
 
         old_backend = self._backend
-        self._scan_upload_generation += 1
-        self._segmentation_preload_paths.clear()
-        self._preload_paths.clear()
-        self._scan_upload_futures.clear()
-        self._backend_scan_paths.clear()
+        self._invalidate_backend_scans()
         old_backend.cancel_active()
         old_backend.shutdown()
         self._backend = BackendClient()
         self._backend_initialized = False
         self._log("Switched backend; scans and model will be prepared again on the selected backend.")
 
+    def _invalidate_backend_scans(self) -> None:
+        with self._scan_state_lock:
+            self._scan_upload_generation += 1
+            self._segmentation_preload_paths.clear()
+            self._preload_paths.clear()
+            self._scan_upload_futures.clear()
+            self._scan_upload_errors.clear()
+            self._backend_scan_paths.clear()
+        self._bridge.scans_changed.emit()
+
     def _start_local_backend_warmup(self, *, switching: bool = False) -> None:
+        if switching:
+            self._invalidate_backend_scans()
+
         def work():
             if switching:
                 self._replace_backend()
@@ -935,6 +963,7 @@ class LongiTrackWidget(QWidget):
             self.backend_status.setText("Local backend ready")
             self.backend_status.setStyleSheet("color: #3c763d;")
             self._log("Local backend ready: registration warmed, model not loaded yet.")
+            self._queue_scan_preloads(self._open_scan_paths())
 
         self._start_model(work, ready, "Local backend startup failed", "Starting local backend")
 
@@ -1000,6 +1029,9 @@ class LongiTrackWidget(QWidget):
         self._remote_private_key = str(key_path)
         self._set_backend_mode(True)
 
+        if switching:
+            self._invalidate_backend_scans()
+
         def work():
             if switching:
                 self._replace_backend()
@@ -1016,12 +1048,9 @@ class LongiTrackWidget(QWidget):
         self.backend_status.setText(f"Remote: {host}:{port}")
         self.backend_status.setStyleSheet("color: #3c763d;")
         self._log(f"Connected to authenticated remote backend {host}:{port}.")
-        self._queue_scan_preloads(
-            [path for layer in self._ct.values() if layer is not None if (path := layer_path(layer)) is not None]
-        )
-        self._queue_segmentation_preloads(
-            [path for layer in self._ct.values() if layer is not None if (path := layer_path(layer)) is not None]
-        )
+        open_scans = self._open_scan_paths()
+        self._queue_scan_preloads(open_scans)
+        self._queue_segmentation_preloads(open_scans)
 
     def _on_test_remote_backend(self) -> None:
         try:
@@ -1196,11 +1225,14 @@ class LongiTrackWidget(QWidget):
 
     def _queue_scan_preloads(self, paths: Sequence[str | Path]) -> None:
         """Prepare scans on the backend; a remote one first needs its own copy of them."""
+        if self._remote_mode() and not self._backend.is_remote:
+            return
         disk_paths = []
         for path in paths:
-            disk_path = str(Path(path).expanduser().absolute())
+            disk_path = _disk_path(path)
             if disk_path not in self._preload_paths:
                 self._preload_paths.add(disk_path)
+                self._scan_upload_errors.pop(disk_path, None)
                 disk_paths.append(disk_path)
         if not disk_paths:
             return
@@ -1223,8 +1255,9 @@ class LongiTrackWidget(QWidget):
                     backend.preload_registration_scans(list(uploaded.values()), progress=emit)
                 except Exception as error:  # noqa: BLE001 - preload is opportunistic
                     emit(f"Could not prepare registration inputs yet ({error}).")
-                if self._scan_upload_generation == generation and self._backend is backend:
-                    self._backend_scan_paths.update(uploaded)
+                with self._scan_state_lock:
+                    if self._scan_upload_generation == generation and self._backend is backend:
+                        self._backend_scan_paths.update(uploaded)
                 return uploaded
             except Exception as error:  # noqa: BLE001 - preparation is opportunistic
                 names = ", ".join(Path(path).name for path in disk_paths)
@@ -1237,12 +1270,44 @@ class LongiTrackWidget(QWidget):
         future = self._preload_pool.submit(work)
         for disk_path in disk_paths:
             self._scan_upload_futures[disk_path] = future
+        future.add_done_callback(lambda _future: self._bridge.scans_changed.emit())
+        self._refresh_action_buttons()
+
+    def _on_scan_preparation_changed(self) -> None:
+        for disk_path, future in list(self._scan_upload_futures.items()):
+            if not future.done():
+                continue
+            del self._scan_upload_futures[disk_path]
+            if (error := future.exception()) is not None and disk_path not in self._backend_scan_paths:
+                self._scan_upload_errors[disk_path] = str(error)
+        self._refresh_action_buttons()
+
+    def _open_scan_paths(self) -> list[Path]:
+        return [path for layer in self._ct.values() if layer is not None if (path := layer_path(layer)) is not None]
+
+    def _scan_preparation_blocker(self) -> str | None:
+        if self._remote_mode() and not self._backend.is_remote:
+            return "Connect to the remote backend first."
+        for role in ROLES:
+            layer = self._ct[role]
+            path = layer_path(layer) if layer is not None else None
+            if path is None:
+                continue
+            disk_path = _disk_path(path)
+            if disk_path in self._backend_scan_paths:
+                continue
+            if (error := self._scan_upload_errors.get(disk_path)) is not None:
+                return (
+                    f"Preparing the {ROLE_WORDS[role]} scan on the backend failed ({error}). Reopen the scan to retry."
+                )
+            return f"Waiting for the {ROLE_WORDS[role]} scan to be uploaded and prepared on the backend..."
+        return None
 
     def _queue_segmentation_preloads(self, paths: Sequence[str | Path]) -> None:
         """Populate LongiSeg cache after weights load, before the first Segment action."""
         if not self._backend_initialized:
             return
-        disk_paths = [str(Path(path).expanduser().absolute()) for path in paths]
+        disk_paths = [_disk_path(path) for path in paths]
         disk_paths = [path for path in dict.fromkeys(disk_paths) if path not in self._segmentation_preload_paths]
         if not disk_paths:
             return
@@ -1252,7 +1317,8 @@ class LongiTrackWidget(QWidget):
 
         def work() -> None:
             try:
-                backend_paths = [self._backend_scan_path(path) for path in disk_paths]
+                # this shares the upload thread: waiting on an upload queued behind it would deadlock
+                backend_paths = [self._backend_scan_path(path, wait=False) for path in disk_paths]
                 backend.load_scans(backend_paths, progress=emit)
             except Exception as error:
                 for path in disk_paths:
@@ -1261,13 +1327,13 @@ class LongiTrackWidget(QWidget):
 
         self._preload_pool.submit(work)
 
-    def _backend_scan_path(self, path: str | Path) -> str:
+    def _backend_scan_path(self, path: str | Path, *, wait: bool = True) -> str:
         """The path the backend should read this scan from."""
-        disk_path = str(Path(path).expanduser().absolute())
+        disk_path = _disk_path(path)
         if not self._backend.is_remote:
             return disk_path  # same filesystem, nothing was ever copied
         future = self._scan_upload_futures.get(disk_path)
-        if future is not None:
+        if wait and future is not None:
             future.result()
         backend_path = self._backend_scan_paths.get(disk_path)
         if backend_path is None:
@@ -1277,23 +1343,10 @@ class LongiTrackWidget(QWidget):
     def _queue_scan_release(self, path: str | Path) -> None:
         if not self._backend.is_running():
             return
-        disk_path = str(Path(path).expanduser().absolute())
+        disk_path = _disk_path(path)
         backend_path = self._backend_scan_paths.get(disk_path)
         if backend_path is not None:
             self._preload_pool.submit(lambda: self._backend.release_scan(backend_path))
-
-    def _discard_prefetch_backend(self) -> None:
-        """Replace a local upload-only backend before connecting a remote one."""
-        from .backend.client import BackendClient
-
-        self._scan_upload_generation += 1
-        self._segmentation_preload_paths.clear()
-        self._preload_paths.clear()
-        self._scan_upload_futures.clear()
-        self._backend_scan_paths.clear()
-        self._backend.cancel_active()
-        self._backend = BackendClient()
-        self._backend_initialized = False
 
     def _on_open_image(self, role: str) -> None:
         path, _ = QFileDialog.getOpenFileName(self, f"Open the {ROLE_WORDS[role]} scan", "", _FILE_FILTER)
@@ -1698,11 +1751,14 @@ class LongiTrackWidget(QWidget):
         rows = range(len(points))
         needs_registration = any(self._row_needs_registration(row, points) for row in rows)
         unsegmented = [row for row in rows if not self._row_lesion_layers(row)]
-        ready = bool(points) and all(self._ct[role] is not None for role in ROLES)
+        blocker = self._scan_preparation_blocker()
+        ready = bool(points) and all(self._ct[role] is not None for role in ROLES) and blocker is None
         self.propagate_button.setEnabled(not self._busy and ready and needs_registration)
         self.track_button.setEnabled(not self._busy and ready and (needs_registration or bool(unsegmented)))
         can_segment = any(self._get_at(self._accepted, row, False) for row in unsegmented)
-        self.segment_button.setEnabled(not self._busy and can_segment)
+        self.segment_button.setEnabled(not self._busy and can_segment and blocker is None)
+        for button in (self.propagate_button, self.segment_button, self.track_button):
+            button.setToolTip(blocker or button.property("idle_tooltip"))
         self.open_pair_button.setEnabled(not self._busy and bool(self._pair_list))
 
     def _stop_adding_points(self) -> None:
@@ -1998,9 +2054,7 @@ class LongiTrackWidget(QWidget):
             source = f'local folder "{self._model_folder.name}"'
         self.model_status.setText(f"Model initialized from {source}, running on {self._device}.")
         self.model_status.setStyleSheet("color: #3c763d;")
-        open_scans = [
-            path for layer in self._ct.values() if layer is not None if (path := layer_path(layer)) is not None
-        ]
+        open_scans = self._open_scan_paths()
         self._queue_scan_preloads(open_scans)
         # scans opened before the model was ready still need preprocessing
         self._queue_segmentation_preloads(open_scans)
