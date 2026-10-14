@@ -55,6 +55,7 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
+from ._model_versions import list_model_versions, split_version, version_number, with_version
 from ._reader import SUPPORTED_SUFFIXES
 from ._windowing import CUSTOM, DEFAULT_PRESET, FULL_RANGE, PRESETS, WindowLevel, from_limits, preset_for
 
@@ -118,6 +119,7 @@ class _Bridge(QObject):
     model_done = Signal(object)
     model_failed = Signal(object)
     scans_changed = Signal()
+    versions_found = Signal(object)
 
 
 class _DaemonWorker:
@@ -261,6 +263,8 @@ class LongiTrackWidget(QWidget):
         self._preload_pool = _DaemonWorker("longitrack-preload")
         # its own pool: Initialize model must never sit behind a session job
         self._model_pool = _DaemonWorker("longitrack-model")
+        self._versions_pool = _DaemonWorker("longitrack-versions")
+        self._versions_token = 0
 
         self._bridge = _Bridge()
         self._bridge.message.connect(self._log)
@@ -269,6 +273,7 @@ class LongiTrackWidget(QWidget):
         self._bridge.model_done.connect(self._on_model_job_done)
         self._bridge.model_failed.connect(self._on_model_job_failed)
         self._bridge.scans_changed.connect(self._on_scan_preparation_changed)
+        self._bridge.versions_found.connect(self._on_model_versions_found)
 
         self._build_ui()
         self._install_canvases()
@@ -426,12 +431,29 @@ class LongiTrackWidget(QWidget):
         container = QWidget()
         container.setLayout(row)
         form.addRow("Location", container)
+        self.model_location.editingFinished.connect(self._refresh_model_versions)
+
+        self.model_version = QComboBox()
+        self.model_version.addItem("Latest", None)
+        self.model_version.setToolTip("Which model version to load. Latest is the newest one available.")
+        self.refresh_versions_button = self._icon_button(
+            QStyle.StandardPixmap.SP_BrowserReload, "Look up the available versions again."
+        )
+        self.refresh_versions_button.clicked.connect(self._refresh_model_versions)
+        version_row = QHBoxLayout()
+        version_row.setContentsMargins(0, 0, 0, 0)
+        version_row.addWidget(self.model_version, stretch=1)
+        version_row.addWidget(self.refresh_versions_button)
+        version_container = QWidget()
+        version_container.setLayout(version_row)
+        form.addRow("Version", version_container)
 
         # what the panel shows is what is used (see resolve_model_folder)
         env_folder = os.environ.get("LONGITRACK_MODEL_DIR", "").strip()
         if env_folder:
             self.model_source.setCurrentIndex(1)
             self.model_location.setText(env_folder)
+        self._refresh_model_versions()
 
         endpoint = os.environ.get("LONGITRACK_REMOTE_BACKEND", "").strip()
         if endpoint:
@@ -844,6 +866,45 @@ class LongiTrackWidget(QWidget):
             self.model_location.setText("")
         if not local and not self.model_location.text().strip():
             self.model_location.setText(DEFAULT_REPO_ID)
+        self._refresh_model_versions()
+
+    def _refresh_model_versions(self) -> None:
+        self._versions_token += 1
+        token = self._versions_token
+        location = self.model_location.text().strip()
+        local = self.model_source.currentIndex() == 1
+
+        def work():
+            try:
+                names, error = (list_model_versions(location, local) if location else []), None
+            except Exception as failure:  # noqa: BLE001 - only Latest is offered then
+                names, error = [], failure
+            self._bridge.versions_found.emit((token, names, error))
+
+        self._versions_pool.submit(work)
+
+    def _on_model_versions_found(self, payload) -> None:
+        token, names, error = payload
+        if token != self._versions_token:
+            return
+        selected = self.model_version.currentData()
+        self.model_version.clear()
+        self.model_version.addItem("Latest", None)
+        for name in names:
+            self.model_version.addItem(name, version_number(name))
+        index = self.model_version.findData(selected)
+        self.model_version.setCurrentIndex(max(index, 0))
+        if error is not None:
+            self._log(f"Could not look up the model versions: {error}")
+
+    def _backend_model_location(self, location: str | None, version: str | None, local_model: bool) -> str | None:
+        # a local backend opens the folder itself; only a remote one needs a copy
+        if local_model and self._backend.is_remote:
+            folder, typed = split_version(location or "")
+            return self._backend.upload_model_folder(folder, self._emit, version=version or typed)
+        if version is None:
+            return location
+        return with_version(location or DEFAULT_REPO_ID, version)
 
     def _remote_endpoint(self) -> tuple[str, int]:
         host = self._normalise_remote_host(self.remote_host.text())
@@ -1076,6 +1137,7 @@ class LongiTrackWidget(QWidget):
         folder = QFileDialog.getExistingDirectory(self, "Select a LongiSeg model folder")
         if folder:
             self.model_location.setText(folder)
+            self._refresh_model_versions()
 
     # ---------------------------------------------------------------- layers -
     def _layer(self, role: str, name: str):
@@ -2018,6 +2080,7 @@ class LongiTrackWidget(QWidget):
 
     def _load_model_job(self, backend_config: tuple[bool, tuple[str, int] | None]):
         location = self.model_location.text().strip() or None
+        version = self.model_version.currentData()
         local_model = self.model_source.currentIndex() == 1
         emit = self._emit
 
@@ -2025,12 +2088,7 @@ class LongiTrackWidget(QWidget):
             self._configure_backend(*backend_config)
             if self._backend.ensure_started(progress=emit):
                 self._backend_initialized = False
-            # a local backend opens the folder itself; only a remote one needs a copy
-            backend_location = (
-                self._backend.upload_model_folder(location, emit)
-                if local_model and self._backend.is_remote
-                else location
-            )
+            backend_location = self._backend_model_location(location, version, local_model)
             # device=None: the backend decides and reports back what it picked
             return self._backend.initialize(backend_location, device=None, progress=emit)
 
@@ -2049,6 +2107,8 @@ class LongiTrackWidget(QWidget):
             # the repo the user asked for, not the local path it was downloaded to
             location = self.model_location.text().strip() or DEFAULT_REPO_ID
             source = f'HuggingFace repo "{location}"'
+            if version_number(self._model_folder.name) is not None:
+                source += f" ({self._model_folder.name})"
         else:
             # just the folder's own name: the user may have pointed at a parent directory
             source = f'local folder "{self._model_folder.name}"'
@@ -2391,6 +2451,7 @@ class LongiTrackWidget(QWidget):
         self._lock_views(baseline_points[rows[0]], followup_points[rows[0]])
 
         location = self.model_location.text().strip() or None
+        version = self.model_version.currentData()
         local_model = self.model_source.currentIndex() == 1
         emit = self._emit
         disable_tta = self._quality_mode()[2]
@@ -2414,12 +2475,7 @@ class LongiTrackWidget(QWidget):
             backend_baseline_path = self._backend_scan_path(baseline_path)
             backend_followup_path = self._backend_scan_path(followup_path)
             if not self._backend_initialized:
-                # a local backend opens the folder itself; only a remote one needs a copy
-                backend_location = (
-                    self._backend.upload_model_folder(location, emit)
-                    if local_model and self._backend.is_remote
-                    else location
-                )
+                backend_location = self._backend_model_location(location, version, local_model)
                 self._backend.initialize(backend_location, device=None, progress=emit)
                 self._backend_initialized = True
 

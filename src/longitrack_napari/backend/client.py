@@ -409,11 +409,13 @@ class BackendClient:
         """Copy one local scan once into content-addressed backend CPU storage."""
         return self.upload_file(path, progress)
 
-    def upload_model_folder(self, folder: str | Path, progress: Progress | None = None) -> str:
+    def upload_model_folder(
+        self, folder: str | Path, progress: Progress | None = None, version: str | None = None,
+    ) -> str:
         """Transfer a local LongiSeg checkpoint and materialize it on the backend."""
         from longitrack_backend.model import CHECKPOINT_NAME, REQUIRED_FILES, validate_model_folder
 
-        source = validate_model_folder(folder, folds=None)
+        source = validate_model_folder(folder, folds=None, version=version)
         files = [source / name for name in REQUIRED_FILES]
         files.extend(sorted(source.glob(f"fold_*/{CHECKPOINT_NAME}")))
         if progress is not None:
